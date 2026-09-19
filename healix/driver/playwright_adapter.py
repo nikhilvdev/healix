@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Any
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame as PlaywrightFrame
 from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 
@@ -34,8 +35,10 @@ class PlaywrightDriverAdapter(Driver):
         *,
         browser: str = "chromium",
         headless: bool = True,
+        settle_timeout_ms: int = 3000,
     ) -> None:
         self._page = page
+        self._settle_timeout_ms = settle_timeout_ms
         self._browser_name = browser
         self._headless = headless
         self._playwright: Playwright | None = None
@@ -68,8 +71,20 @@ class PlaywrightDriverAdapter(Driver):
 
     # -- Driver ------------------------------------------------------------- #
 
+    @property
+    def current_url(self) -> str:
+        return self.page.url
+
     def navigate(self, url: str) -> None:
         self.page.goto(url, wait_until="load")
+        # Client-rendered pages keep fetching after `load`; give them a bounded chance to settle.
+        # Busy pages (polling, websockets) never go idle, so a timeout here is expected, not an error.
+        # (Playwright treats timeout=0 as "wait forever", so 0 here means "don't wait".)
+        if self._settle_timeout_ms > 0:
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=self._settle_timeout_ms)
+            except PlaywrightError:
+                logger.debug("network did not go idle within %sms on %s", self._settle_timeout_ms, url)
 
     def get_frames(self) -> list[Frame]:
         return walk_frames(

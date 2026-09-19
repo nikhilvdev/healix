@@ -142,6 +142,8 @@ function computedState(el, root, rect) {
     readonly: isTextField ? el.readOnly : null,
     required: (isTextField || el.localName === 'select') ? el.required : null,
     focused: root.activeElement === el,
+    // Absolute URL as the browser resolves it (honours <base href>); null for non-links.
+    href: ((el.localName === 'a' || el.localName === 'area') && typeof el.href === 'string' && el.href) ? el.href : null,
   };
 }
 

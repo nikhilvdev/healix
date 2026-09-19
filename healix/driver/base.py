@@ -104,6 +104,11 @@ class Driver(ABC):
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    @property
+    @abstractmethod
+    def current_url(self) -> str:
+        """URL of the main frame, after any redirects."""
+
     @abstractmethod
     def navigate(self, url: str) -> None: ...
 
