@@ -18,9 +18,10 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from healix.driver.base import Element
@@ -46,8 +47,23 @@ INTERRUPTED = "interrupted"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _NOISE_PARAMS = frozenset(
     {
-        "gclid", "fbclid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid", "_ga", "_gl",
-        "sessionid", "session_id", "sid", "phpsessid", "jsessionid", "sessid", "cfid", "cftoken",
+        "gclid",
+        "fbclid",
+        "msclkid",
+        "dclid",
+        "yclid",
+        "mc_cid",
+        "mc_eid",
+        "_ga",
+        "_gl",
+        "sessionid",
+        "session_id",
+        "sid",
+        "phpsessid",
+        "jsessionid",
+        "sessid",
+        "cfid",
+        "cftoken",
     }
 )
 _NOISE_PREFIXES = ("utm_",)
@@ -82,7 +98,11 @@ def normalize_url(url: str) -> str:
         path = path.rstrip("/") or "/"
 
     query = urlencode(
-        sorted((k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not _is_noise_param(k))
+        sorted(
+            (k, v)
+            for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not _is_noise_param(k)
+        )
     )
     fragment = parts.fragment if parts.fragment.startswith(("/", "!")) else ""
     return urlunsplit((scheme, netloc, path, query, fragment))

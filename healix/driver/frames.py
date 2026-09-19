@@ -16,7 +16,8 @@ Closed shadow roots and cross-origin frames are not reachable and are skipped.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Iterable, TypeVar
+from collections.abc import Callable, Iterable
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from healix.driver.base import MAIN_FRAME, Element, Frame
@@ -238,7 +239,9 @@ def walk_frames(
     root_origin = origin_of(root_url)
     frames = [Frame(path=[MAIN_FRAME], url=root_url, name=None, same_origin=True, handle=root)]
 
-    def visit(parent: H, parent_path: list[str], parent_same_origin: bool, parent_origin: str | None) -> None:
+    def visit(
+        parent: H, parent_path: list[str], parent_same_origin: bool, parent_origin: str | None
+    ) -> None:
         used: set[str] = set()
         for index, child in enumerate(children_of(parent)):
             name = name_of(child) or None
@@ -247,7 +250,9 @@ def walk_frames(
             origin = origin_of(url) or parent_origin
             same_origin = parent_same_origin and origin == root_origin
             path = [*parent_path, label]
-            frames.append(Frame(path=path, url=url, name=name, same_origin=same_origin, handle=child))
+            frames.append(
+                Frame(path=path, url=url, name=name, same_origin=same_origin, handle=child)
+            )
             visit(child, path, same_origin, origin)
 
     visit(root, [MAIN_FRAME], True, root_origin)
@@ -279,7 +284,9 @@ def collect_elements(
         try:
             raw_elements = run_collector(frame)
         except Exception as exc:
-            logger.warning("could not collect elements from frame %s (%s): %s", frame.path, frame.url, exc)
+            logger.warning(
+                "could not collect elements from frame %s (%s): %s", frame.path, frame.url, exc
+            )
             continue
         elements.extend(Element.from_dict(raw, iframe_path=frame.path) for raw in raw_elements)
     return elements

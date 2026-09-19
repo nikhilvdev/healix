@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from typing import Any, Union
+from typing import Any
 
 from healix.healing.fingerprint import Fingerprint
 from healix.ids import normalize_id
@@ -60,7 +60,9 @@ class Element:
             computed=dict(raw.get("computed") or {}),
             xpath=raw.get("xpath"),
             css_selector=raw.get("css_selector"),
-            iframe_path=list(iframe_path if iframe_path is not None else raw.get("iframe_path") or []),
+            iframe_path=list(
+                iframe_path if iframe_path is not None else raw.get("iframe_path") or []
+            ),
             platform_signal=raw.get("platform_signal"),
             dom_context=dict(raw.get("dom_context") or {}),
             shadow_path=list(raw.get("shadow_path") or []),
@@ -85,16 +87,16 @@ class Frame:
     handle: Any = field(default=None, repr=False, compare=False)
 
 
-Target = Union[Element, Fingerprint]
+Target = Element | Fingerprint
 
 
 class Driver(ABC):
     """Browser automation surface used by all of Healix."""
 
-    def start(self) -> None:
+    def start(self) -> None:  # noqa: B027 - optional hook, not abstract
         """Acquire browser resources. Adapters that lazily launch override this."""
 
-    def close(self) -> None:
+    def close(self) -> None:  # noqa: B027 - optional hook, not abstract
         """Release any browser resources this driver owns."""
 
     def __enter__(self) -> Driver:

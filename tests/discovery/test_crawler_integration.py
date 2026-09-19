@@ -30,18 +30,23 @@ def test_discovers_the_whole_reachable_site(driver, crawl_site_url, tmp_path):
     found = {p.url.removeprefix(crawl_site_url) for p in manifest.pages}
     assert found == {
         "/index.html",
-        "/a.html", "/b.html", "/c.html", "/d.html",  # chain: depth is unlimited
-        "/products/1.html",                            # /products/2..4 are variants of it
-        "/hidden.html",                                # only linked from a structural duplicate (/products/3)
-        "/embedded-target.html",                       # link lives inside an iframe
-        "/shadow-target.html",                         # link lives inside a shadow root
+        "/a.html",
+        "/b.html",
+        "/c.html",
+        "/d.html",  # chain: depth is unlimited
+        "/products/1.html",  # /products/2..4 are variants of it
+        "/hidden.html",  # only linked from a structural duplicate (/products/3)
+        "/embedded-target.html",  # link lives inside an iframe
+        "/shadow-target.html",  # link lives inside a shadow root
     }
     # d.html links to "/", which serves the same page as /index.html: same structure, so a variant
     index = manifest.find_by_url(crawl_site_url + "/index.html")
     assert [v.removeprefix(crawl_site_url) for v in index.variant_urls] == ["/"]
     product = manifest.find_by_url(crawl_site_url + "/products/1.html")
     assert sorted(v.removeprefix(crawl_site_url) for v in product.variant_urls) == [
-        "/products/2.html", "/products/3.html", "/products/4.html",
+        "/products/2.html",
+        "/products/3.html",
+        "/products/4.html",
     ]
     assert manifest.discovery_status == m.COMPLETE
     assert all(p.status == m.PENDING and p.structural_hash for p in manifest.pages)
@@ -50,7 +55,9 @@ def test_discovers_the_whole_reachable_site(driver, crawl_site_url, tmp_path):
 
 
 def test_max_pages_is_respected_against_a_real_browser(driver, crawl_site_url):
-    manifest = DiscoveryCrawler(driver, DiscoveryConfig(max_pages=3)).discover([crawl_site_url + "/index.html"])
+    manifest = DiscoveryCrawler(driver, DiscoveryConfig(max_pages=3)).discover(
+        [crawl_site_url + "/index.html"]
+    )
     assert manifest.pages_discovered <= 3
     assert manifest.discovery_status == m.MAX_PAGES_REACHED
 

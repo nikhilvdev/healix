@@ -1,0 +1,97 @@
+name: Bug report
+description: Something isn't working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please don't use this
+        template for security vulnerabilities — see [SECURITY.md](https://github.com/nikhilvdev/healix/blob/main/.github/SECURITY.md)
+        instead. Never paste credentials, tokens, or session cookies into an issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: >-
+        A short code snippet, plus the smallest HTML (or a public URL) that triggers it.
+        For a wrong extraction or a missed link, the offending markup is the most useful part.
+      render: python
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Driver / element extraction
+        - iframe or shadow DOM handling
+        - Discovery / manifest
+        - Classification
+        - Healing
+        - Script generation
+        - Login
+        - CLI / SDK / events
+        - Other
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: healix version
+      placeholder: e.g. 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: backend
+    attributes:
+      label: Backend and browser
+      placeholder: e.g. playwright 1.49 / chromium
+    validations:
+      required: false
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: e.g. 3.12.4
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. macOS 15, Ubuntu 24.04, Windows 11
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or traceback
+      description: Redact any URLs, tokens, or personal data first.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this hasn't been reported already
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md)
+          required: true

@@ -16,9 +16,7 @@ UUID_PLACEHOLDER = "{uuid}"
 HEX_PLACEHOLDER = "{hex}"
 NUMBER_PLACEHOLDER = "{n}"
 
-_UUID = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
-)
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 # Long hex-looking token (>= 8 chars) with at least one digit and one a-f letter,
 # delimited by non-alphanumerics, e.g. the "a3f9c2d81b" in "btn_a3f9c2d81b".
 _HEX_FRAGMENT = re.compile(

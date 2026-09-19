@@ -38,7 +38,11 @@ def test_extracts_light_dom_element_with_full_detail(page):
     assert el.id_normalized == "user-{n}"
     assert el.name == "username"
     assert el.classes == ["form-control", "input-lg"]
-    assert el.attributes == {"type": "text", "data-testid": "login-username", "aria-label": "Username"}
+    assert el.attributes == {
+        "type": "text",
+        "data-testid": "login-username",
+        "aria-label": "Username",
+    }
     assert el.css_selector == "#user-4471"
     assert el.xpath == '//*[@id="user-4471"]'
     assert el.iframe_path == ["main"]
@@ -115,13 +119,16 @@ def test_click_and_write_reach_iframe_and_shadow_elements(page):
     page.write("a@b.co", _by(elements, id="email"))
     assert form_frame.handle.evaluate("document.getElementById('email').value") == "a@b.co"
     page.write("deep text", _by(elements, id="deep-1"))
-    assert page.page.evaluate(
-        "document.getElementById('lwc-host').shadowRoot.getElementById('inner-host').shadowRoot.getElementById('deep-1').value"
-    ) == "deep text"
+    assert (
+        page.page.evaluate(
+            "document.getElementById('lwc-host').shadowRoot.getElementById('inner-host').shadowRoot.getElementById('deep-1').value"
+        )
+        == "deep text"
+    )
 
 
 def _fingerprint(**overrides):
-    base = dict(page_url="u", element_role="textbox", tag="input")
+    base = {"page_url": "u", "element_role": "textbox", "tag": "input"}
     base.update(overrides)
     return Fingerprint(**base)
 
@@ -144,8 +151,14 @@ def test_find_falls_back_through_name_aria_and_text(page):
 
 
 def test_find_searches_inside_frames_and_shadow_roots(page):
-    assert page.find(_fingerprint(id="email")).iframe_path == ["main", "workspace_panel", "form_frame"]
-    assert page.find(_fingerprint(attributes={"data-testid": "shadow-btn"})).shadow_path == ["#lwc-host"]
+    assert page.find(_fingerprint(id="email")).iframe_path == [
+        "main",
+        "workspace_panel",
+        "form_frame",
+    ]
+    assert page.find(_fingerprint(attributes={"data-testid": "shadow-btn"})).shadow_path == [
+        "#lwc-host"
+    ]
 
 
 def test_find_is_scoped_by_iframe_path(page):

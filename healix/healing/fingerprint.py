@@ -7,8 +7,9 @@ derived from it. Phase 7 extends this module (weights, history, persistence).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from healix.driver.base import Element

@@ -41,7 +41,10 @@ def test_normalize_url_rejects_malformed_port():
 def test_template_key_collapses_volatile_segments_only():
     assert template_key("https://e.com/product/123") == template_key("https://e.com/product/456")
     assert template_key("https://e.com/product/123/") == "https://e.com/product/{n}"
-    assert template_key("https://e.com/orders/123e4567-e89b-12d3-a456-426614174000") == "https://e.com/orders/{uuid}"
+    assert (
+        template_key("https://e.com/orders/123e4567-e89b-12d3-a456-426614174000")
+        == "https://e.com/orders/{uuid}"
+    )
     assert template_key("https://e.com/about") != template_key("https://e.com/contact")
     # query values are kept: ?page=2 and ?page=3 are different pages, not one template
     assert template_key("https://e.com/list?page=2") != template_key("https://e.com/list?page=3")
@@ -52,8 +55,19 @@ def _el(tag, **kw):
 
 
 def test_structural_hash_ignores_text_list_length_volatile_ids_and_class_state():
-    a = [_el("h1", text_content="Widget"), _el("li", id="row-1"), _el("li", id="row-2"), _el("a", classes=["active"])]
-    b = [_el("h1", text_content="Gadget"), _el("li", id="row-7"), _el("li", id="row-8"), _el("li", id="row-9"), _el("a")]
+    a = [
+        _el("h1", text_content="Widget"),
+        _el("li", id="row-1"),
+        _el("li", id="row-2"),
+        _el("a", classes=["active"]),
+    ]
+    b = [
+        _el("h1", text_content="Gadget"),
+        _el("li", id="row-7"),
+        _el("li", id="row-8"),
+        _el("li", id="row-9"),
+        _el("a"),
+    ]
     assert structural_hash(a) == structural_hash(b)
 
 
@@ -95,7 +109,11 @@ def test_status_tracking_and_resume_set():
         m.add_page(f"https://e.com/{name}", f"h-{name}")
     m.mark_extracted("https://e.com/a", "out/a.json")
     m.mark_failed("https://e.com/b", "timeout")
-    assert [p.url for p in m.remaining_pages()] == ["https://e.com/b", "https://e.com/c", "https://e.com/d"]
+    assert [p.url for p in m.remaining_pages()] == [
+        "https://e.com/b",
+        "https://e.com/c",
+        "https://e.com/d",
+    ]
     assert m.pages_extracted == 1
     assert m.find_by_url("https://e.com/a").output_file == "out/a.json"
     assert m.find_by_url("https://e.com/b").status == FAILED
@@ -136,13 +154,23 @@ def test_manifest_json_has_documented_run_level_fields(tmp_path):
     m.add_page("https://e.com/", "h")
     m.save(tmp_path / "m.json")
     raw = json.loads((tmp_path / "m.json").read_text())
-    assert {"run_id", "pages_discovered", "pages_extracted", "platform_detected", "pages"} <= raw.keys()
-    assert {"url", "page_type", "structural_hash", "status", "output_file"} <= raw["pages"][0].keys()
+    assert {
+        "run_id",
+        "pages_discovered",
+        "pages_extracted",
+        "platform_detected",
+        "pages",
+    } <= raw.keys()
+    assert {"url", "page_type", "structural_hash", "status", "output_file"} <= raw["pages"][
+        0
+    ].keys()
     assert raw["pages_discovered"] == 1 and raw["pages_extracted"] == 0
 
 
 def test_load_rejects_invalid_status(tmp_path):
-    (tmp_path / "m.json").write_text(json.dumps({"run_id": "r", "pages": [{"url": "u", "status": "bogus"}]}))
+    (tmp_path / "m.json").write_text(
+        json.dumps({"run_id": "r", "pages": [{"url": "u", "status": "bogus"}]})
+    )
     with pytest.raises(ValueError):
         Manifest.load(tmp_path / "m.json")
 

@@ -1,21 +1,113 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "healix"
 version = "0.1.0.dev0"
 description = "Crawl a website, classify and extract every page element, and generate self-healing Selenium/Playwright automation."
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+authors = [{ name = "Nikhil Arora" }]
+keywords = [
+    "web-crawler",
+    "self-healing",
+    "test-automation",
+    "e2e-testing",
+    "playwright",
+    "selenium",
+    "locators",
+    "element-extraction",
+    "page-object-model",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
 dependencies = []
 
 [project.optional-dependencies]
+# Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
+# Selenium adapter (Phase 8).
 playwright = ["playwright>=1.40"]
-dev = ["pytest>=8", "playwright>=1.40"]
+dev = [
+    "playwright>=1.40",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "build>=1.2",
+    "twine>=5.1",
+]
+hooks = [
+    # Local-only; kept out of "dev" so CI doesn't install it.
+    "pre-commit>=3.7",
+]
+docs = [
+    # Renders the API reference published to GitHub Pages; not needed to use or develop healix.
+    "pdoc>=16",
+    "playwright>=1.40",
+]
 
-[tool.setuptools.packages.find]
-include = ["healix*"]
+[project.urls]
+Homepage = "https://github.com/nikhilvdev/healix"
+Repository = "https://github.com/nikhilvdev/healix"
+Changelog = "https://github.com/nikhilvdev/healix/blob/main/CHANGELOG.md"
+Issues = "https://github.com/nikhilvdev/healix/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["healix"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist rather than an exclude list: keeps the sdist limited to what the
+# package needs regardless of what untracked tool/editor state sits in the working tree.
+include = [
+    "/healix",
+    "/tests",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CODE_OF_CONDUCT.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/.env.example",
+    "/pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.format]
+# Markdown code blocks are illustrative (some are pseudo-code); keep them out of the format gate.
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# The in-page collector is JavaScript inside a Python string; wrapping it hurts readability.
+"healix/driver/frames.py" = ["E501"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["healix"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["healix"]

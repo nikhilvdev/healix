@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest an addition or change to Healix
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do that Healix doesn't support today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: The API or behavior you'd like to see. A short code sketch helps.
+      render: python
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: design
+    attributes:
+      label: Design constraints
+      description: >-
+        Healix has a few fixed design decisions (see CONTRIBUTING.md). Tick any your
+        request would need to change, so we can discuss it as a design question first.
+      options:
+        - label: Needs a language other than Python, or a compiled core
+          required: false
+        - label: Needs an LLM call in the crawl/classify/extract path
+          required: false
+        - label: Needs secrets somewhere other than `.env`
+          required: false
+        - label: Needs a locator/extraction change that only works for one vendor's platform
+          required: false

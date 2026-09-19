@@ -17,13 +17,20 @@ import logging
 import os
 import uuid
 from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any
 from urllib.parse import urlsplit
 
-from healix.driver.base import Driver, Element
 from healix.discovery import manifest as m
-from healix.discovery.manifest import Manifest, ManifestPage, normalize_url, structural_hash, template_key
+from healix.discovery.manifest import (
+    Manifest,
+    ManifestPage,
+    normalize_url,
+    structural_hash,
+    template_key,
+)
+from healix.driver.base import Driver, Element
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +40,45 @@ DEDUPE_MODES = ("url_normalized", "url_normalized_and_structural_hash")
 # Links to these are resources, not pages.
 _NON_PAGE_EXTENSIONS = frozenset(
     {
-        "pdf", "zip", "gz", "tar", "rar", "7z", "exe", "dmg", "msi", "apk",
-        "png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "bmp",
-        "mp3", "mp4", "mov", "avi", "webm", "wav",
-        "css", "js", "json", "xml", "csv", "xls", "xlsx", "doc", "docx", "ppt", "pptx",
-        "woff", "woff2", "ttf", "eot",
+        "pdf",
+        "zip",
+        "gz",
+        "tar",
+        "rar",
+        "7z",
+        "exe",
+        "dmg",
+        "msi",
+        "apk",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "svg",
+        "webp",
+        "ico",
+        "bmp",
+        "mp3",
+        "mp4",
+        "mov",
+        "avi",
+        "webm",
+        "wav",
+        "css",
+        "js",
+        "json",
+        "xml",
+        "csv",
+        "xls",
+        "xlsx",
+        "doc",
+        "docx",
+        "ppt",
+        "pptx",
+        "woff",
+        "woff2",
+        "ttf",
+        "eot",
     }
 )
 
@@ -62,7 +103,9 @@ class DiscoveryConfig:
 
     def __post_init__(self) -> None:
         if self.domain_scope not in DOMAIN_SCOPES:
-            raise ValueError(f"domain_scope must be one of {DOMAIN_SCOPES}, got {self.domain_scope!r}")
+            raise ValueError(
+                f"domain_scope must be one of {DOMAIN_SCOPES}, got {self.domain_scope!r}"
+            )
         if self.dedupe_by not in DEDUPE_MODES:
             raise ValueError(f"dedupe_by must be one of {DEDUPE_MODES}, got {self.dedupe_by!r}")
         if self.max_pages < 1:
@@ -71,7 +114,7 @@ class DiscoveryConfig:
             raise ValueError("template_sample_size cannot be negative")
 
     @classmethod
-    def from_dict(cls, raw: dict) -> DiscoveryConfig:
+    def from_dict(cls, raw: dict[str, Any]) -> DiscoveryConfig:
         return cls(**raw)
 
 
@@ -128,7 +171,10 @@ class DiscoveryCrawler:
                 if queue:
                     url = queue.popleft()
                     key = template_key(url)
-                    if config.template_sample_size and template_visits[key] >= config.template_sample_size:
+                    if (
+                        config.template_sample_size
+                        and template_visits[key] >= config.template_sample_size
+                    ):
                         deferred.append(url)
                         continue
                 else:
@@ -142,7 +188,9 @@ class DiscoveryCrawler:
                     if link not in seen:
                         seen.add(link)
                         queue.append(link)
-            manifest.discovery_status = m.COMPLETE if not (queue or deferred) else m.MAX_PAGES_REACHED
+            manifest.discovery_status = (
+                m.COMPLETE if not (queue or deferred) else m.MAX_PAGES_REACHED
+            )
         except BaseException:
             manifest.discovery_status = m.INTERRUPTED
             raise

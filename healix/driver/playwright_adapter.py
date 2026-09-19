@@ -51,15 +51,19 @@ class PlaywrightDriverAdapter(Driver):
         if self._page is not None:
             return
         self._playwright = sync_playwright().start()
-        self._browser = getattr(self._playwright, self._browser_name).launch(headless=self._headless)
+        self._browser = getattr(self._playwright, self._browser_name).launch(
+            headless=self._headless
+        )
         self._page = self._browser.new_context().new_page()
         self._owns_browser = True
 
     def close(self) -> None:
         if not self._owns_browser:
             return
-        self._browser.close()
-        self._playwright.stop()
+        if self._browser is not None:
+            self._browser.close()
+        if self._playwright is not None:
+            self._playwright.stop()
         self._page = self._browser = self._playwright = None
         self._owns_browser = False
 
@@ -78,13 +82,15 @@ class PlaywrightDriverAdapter(Driver):
     def navigate(self, url: str) -> None:
         self.page.goto(url, wait_until="load")
         # Client-rendered pages keep fetching after `load`; give them a bounded chance to settle.
-        # Busy pages (polling, websockets) never go idle, so a timeout here is expected, not an error.
+        # Busy pages (polling, websockets) never go idle, so a timeout here is expected.
         # (Playwright treats timeout=0 as "wait forever", so 0 here means "don't wait".)
         if self._settle_timeout_ms > 0:
             try:
                 self.page.wait_for_load_state("networkidle", timeout=self._settle_timeout_ms)
             except PlaywrightError:
-                logger.debug("network did not go idle within %sms on %s", self._settle_timeout_ms, url)
+                logger.debug(
+                    "network did not go idle within %sms on %s", self._settle_timeout_ms, url
+                )
 
     def get_frames(self) -> list[Frame]:
         return walk_frames(
@@ -96,7 +102,9 @@ class PlaywrightDriverAdapter(Driver):
         )
 
     def get_elements(self) -> list[Element]:
-        return collect_elements(self.get_frames(), lambda frame: frame.handle.evaluate(COLLECT_ALL_JS))
+        return collect_elements(
+            self.get_frames(), lambda frame: frame.handle.evaluate(COLLECT_ALL_JS)
+        )
 
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)
@@ -104,7 +112,9 @@ class PlaywrightDriverAdapter(Driver):
             for frame in frames:
                 locator = self._resolve(spec, frame.handle, fingerprint)
                 if locator is not None:
-                    return Element.from_dict(locator.evaluate(DESCRIBE_ONE_JS), iframe_path=frame.path)
+                    return Element.from_dict(
+                        locator.evaluate(DESCRIBE_ONE_JS), iframe_path=frame.path
+                    )
         raise ElementNotFoundError(
             f"no unique element for {fingerprint.element_role!r} on {fingerprint.page_url} "
             f"(tried {[s.strategy for s in fingerprint.locators()]})"
@@ -127,12 +137,15 @@ class PlaywrightDriverAdapter(Driver):
             frames = [f for f in frames if f.path == fingerprint.iframe_path]
         return frames
 
-    def _resolve(self, spec: LocatorSpec, frame: PlaywrightFrame, fingerprint: Fingerprint) -> Locator | None:
+    def _resolve(
+        self, spec: LocatorSpec, frame: PlaywrightFrame, fingerprint: Fingerprint
+    ) -> Locator | None:
         """Turn ``spec`` into a locator matching exactly one element in ``frame``, else ``None``.
 
         A locator matching several elements is ambiguous, so it is treated as a
         miss and the next strategy gets a turn.
         """
+        locator: Locator | None
         if spec.kind == "css":
             locator = frame.locator(spec.value)
         elif spec.kind == "xpath":
@@ -142,7 +155,9 @@ class PlaywrightDriverAdapter(Driver):
         elif spec.kind == "id_pattern":
             with_ids = frame.locator("[id]")
             ids = with_ids.evaluate_all("els => els.map(e => e.id)")
-            matches = [i for i, candidate in enumerate(ids) if normalize_id(candidate) == spec.value]
+            matches = [
+                i for i, candidate in enumerate(ids) if normalize_id(candidate) == spec.value
+            ]
             locator = with_ids.nth(matches[0]) if len(matches) == 1 else None
         else:
             raise ValueError(f"unknown locator kind {spec.kind!r}")
@@ -160,7 +175,8 @@ class PlaywrightDriverAdapter(Driver):
             raise ElementNotFoundError("element has no css_selector to locate it by")
         for frame in self.get_frames():
             if frame.path == element.iframe_path:
-                return frame.handle.locator(element.css_selector)
+                locator: Locator = frame.handle.locator(element.css_selector)
+                return locator
         raise ElementNotFoundError(f"frame {element.iframe_path} not found")
 
 
