@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "healix"
+version = "0.1.0.dev0"
+description = "Crawl a website, classify and extract every page element, and generate self-healing Selenium/Playwright automation."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.40"]
+dev = ["pytest>=8", "playwright>=1.40"]
+
+[tool.setuptools.packages.find]
+include = ["healix*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+  <title>Fixture</title>
+  <style>.hidden { display: none; }</style>
+  <script>window.__clicks = [];</script>
+</head>
+<body>
+  <form id="login">
+    <label for="user-4471">Username</label>
+    <input id="user-4471" name="username" class="form-control input-lg"
+           type="text" data-testid="login-username" aria-label="Username">
+    <label>Password <input id="pw-1" name="password" type="password"></label>
+    <button id="submit-btn" type="submit" disabled>Sign in</button>
+  </form>
+  <span class="hidden" id="ghost">invisible</span>
+  <a id="pt1:r1:0:link" href="/next">Next page</a>
+
+  <lwc-host id="lwc-host"></lwc-host>
+
+  <iframe name="workspace_panel" src="panel.html" width="500" height="300"></iframe>
+  <iframe id="foreign" src="{{CROSS_ORIGIN}}/foreign.html" width="300" height="100"></iframe>
+
+  <script>
+    const outer = document.getElementById('lwc-host').attachShadow({ mode: 'open' });
+    outer.innerHTML =
+      '<div class="card"><button data-testid="shadow-btn">Save</button><inner-host id="inner-host"></inner-host></div>';
+    outer.querySelector('button').addEventListener('click', () => window.__clicks.push('shadow-btn'));
+    const inner = outer.getElementById('inner-host').attachShadow({ mode: 'open' });
+    inner.innerHTML = '<input name="deep" id="deep-1">';
+  </script>
+</body>
+</html>
