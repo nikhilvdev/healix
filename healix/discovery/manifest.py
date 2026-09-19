@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import re
-import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +24,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from healix.driver.base import Element
+from healix.fs import write_json_atomic
 from healix.ids import normalize_id
 
 PENDING = "pending"
@@ -313,17 +313,7 @@ class Manifest:
 
     def save(self, path: str | os.PathLike[str]) -> None:
         """Write atomically, so a crash mid-write never leaves a truncated manifest."""
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self.to_dict(), handle, indent=2)
-                handle.write("\n")
-            os.replace(tmp_name, target)
-        except BaseException:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
+        write_json_atomic(path, self.to_dict())
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> Manifest:

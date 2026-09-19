@@ -41,7 +41,7 @@ dependencies = ["logquill>=1.0"]
 
 [project.optional-dependencies]
 # Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
-# Selenium adapter (Phase 8).
+# Selenium adapter.
 playwright = ["playwright>=1.40"]
 dev = [
     "playwright>=1.40",

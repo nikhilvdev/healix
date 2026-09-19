@@ -156,7 +156,12 @@ function describe(el) {
   const chain = selectorChain(el);
   const rect = el.getBoundingClientRect();
   const attributes = {};
-  for (const a of el.attributes) if (a.name !== 'id' && a.name !== 'class' && a.name !== 'name') attributes[a.name] = a.value;
+  const isPassword = el.localName === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'password';
+  for (const a of el.attributes) {
+    if (a.name === 'id' || a.name === 'class' || a.name === 'name') continue;
+    // A password field's markup value is a secret; record that it existed, never what it was.
+    attributes[a.name] = (isPassword && a.name === 'value') ? '[redacted]' : a.value;
+  }
   const parentNode = el.parentNode;
   const parentEl = el.parentElement || (parentNode && parentNode.host) || null;
   const siblings = parentNode && parentNode.children ? Array.from(parentNode.children) : [el];

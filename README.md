@@ -10,9 +10,9 @@ self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
 **Status: pre-release, under active development.** The driver abstraction (Playwright),
-iframe/shadow-DOM traversal, stable-ID normalization, Phase A page discovery with its
-manifest, and rule-based page classification are implemented and tested. The extraction
-writer, login handling, the healing scorer and store, the Selenium adapter, script generation,
+iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
+rule-based page classification, and extraction to per-page JSON are
+implemented and tested. Login handling, the healing scorer and store, the Selenium adapter, script generation,
 and the SDK/CLI/event surface are **not built yet** — see the [Roadmap](#roadmap) and
 `CHANGELOG.md`. Nothing is published to PyPI yet.
 
@@ -33,7 +33,7 @@ Available now:
   `pt{n}:r{n}:{n}:soc{n}::content`, UUIDs and long hex fragments too
 - **Fingerprint resolution** — `driver.find(fingerprint)` tries stable attributes → id →
   name → aria-label → css → xpath → normalized id → text, and rejects ambiguous matches
-- **Two-phase crawl, phase A: discovery** — finds every reachable in-scope page with **no
+- **Two-stage crawl, stage one: discovery** — finds every reachable in-scope page with **no
   depth cutoff**, bounded only by a `max_pages` safety ceiling
 - **Deduplication by normalized URL *and* structural hash** — `/product/123` and
   `/product/456` on one template become one manifest entry
@@ -50,7 +50,11 @@ Available now:
   optional extra
 - **Typed throughout** — `mypy --strict` clean
 
-Planned (see [Roadmap](#roadmap)): sequential extraction to per-page JSON, auto-detected login with `.env` credentials, weighted and threshold-gated
+- **Sequential, resumable extraction (stage two)** — walks the manifest one page at a time and
+  writes one full-detail JSON file per page, saving progress after every page so an
+  interrupted run resumes where it stopped — see [Extraction and output](#extraction-and-output)
+
+Planned (see [Roadmap](#roadmap)): auto-detected login with `.env` credentials, weighted and threshold-gated
 self-healing with a persistent fingerprint store, a Selenium adapter, script generation,
 and the SDK / CLI / webhook surface.
 
@@ -166,26 +170,57 @@ with PlaywrightDriverAdapter() as driver:
 `DiscoveryCrawler` runs this on every page it visits, so each manifest entry already has
 a `page_type`.
 
-### Resume from a manifest
+### Extract every discovered page to JSON
 
 ```python
-from healix.discovery.manifest import Manifest
+from healix.discovery.crawler import DiscoveryConfig, DiscoveryCrawler
+from healix.driver.playwright_adapter import PlaywrightDriverAdapter
+from healix.extraction import ElementExtractor, ExtractionConfig
 
-manifest = Manifest.load("output/manifest.json")
-for page in manifest.remaining_pages():  # everything not yet "extracted"
-    print(page.url)
+with PlaywrightDriverAdapter() as driver:
+    # Discovery: find the pages (writes output/manifest.json)
+    DiscoveryCrawler(driver, DiscoveryConfig(max_pages=5)).discover(
+        ["https://quotes.toscrape.com/"], run_id="demo", manifest_path="output/manifest.json"
+    )
 
-manifest.mark_extracted("https://example.com/", "output/example.com.json")
-manifest.save("output/manifest.json")
+    # Extraction: extract each one, one at a time, into output/pages/
+    manifest = ElementExtractor(driver, ExtractionConfig(output_path="output")).extract(
+        "output/manifest.json"
+    )
+
+print(manifest.pages_extracted, "of", manifest.pages_discovered, "extracted")
+for page in manifest.pages:
+    print(page.status, page.page_type, page.output_file)
 ```
+
+```text
+4 of 4 extracted
+extracted list pages/0001-quotes.toscrape.com.json
+extracted login pages/0002-quotes.toscrape.com-login.json
+extracted unknown pages/0003-quotes.toscrape.com-author-albert-einstein.json
+extracted detail pages/0004-quotes.toscrape.com-tag-change-page-1.json
+```
+
+### Resume an interrupted run
+
+Progress is saved after every page, so just run the extractor again over the same manifest:
+
+```python
+with PlaywrightDriverAdapter() as driver:
+    ElementExtractor(driver, ExtractionConfig(output_path="output")).extract("output/manifest.json")
+```
+
+Pages already `extracted` are skipped, `failed` pages are retried, and a page marked
+`extracted` whose output file has gone missing is extracted again. Low-level access is on
+`Manifest`: `remaining_pages()`, `mark_extracted()`, `mark_failed()`, `save()`.
 
 ## How it works
 
-Healix crawls in two phases rather than as a depth-limited breadth-first walk.
+Healix crawls in two stages rather than as a depth-limited breadth-first walk.
 
 ```text
-Phase A — discovery                        Phase B — extraction (planned)
-─────────────────────                      ──────────────────────────────
+Stage 1 — discovery                        Stage 2 — extraction
+───────────────────                        ────────────────────
 walk links, no depth cutoff                walk the manifest one page at a time
 dedupe by URL + structural hash            navigate → wait → extract full element JSON
 stop at max_pages or empty frontier        → write output → mark "extracted" → next
@@ -194,7 +229,7 @@ stop at max_pages or empty frontier        → write output → mark "extracted"
                        (resume any run_id from the first non-extracted page)
 ```
 
-Phase B is sequential by default so fingerprint-store writes stay ordered and resumability
+Extraction is sequential by default so fingerprint-store writes stay ordered and resumability
 stays simple.
 
 ### The `Driver` abstraction
@@ -207,7 +242,7 @@ class Driver(ABC):
     def find(self, fingerprint: Fingerprint) -> Element: ...
     def click(self, target: Element | Fingerprint) -> None: ...
     def write(self, text: str, into: Element | Fingerprint) -> None: ...
-    def get_elements(self) -> list[Element]: ...
+    def get_elements(self, *, iframe_traversal: bool = True) -> list[Element]: ...
     def get_frames(self) -> list[Frame]: ...  # recursive, same-origin
     def screenshot(self) -> bytes: ...
 ```
@@ -286,7 +321,9 @@ Notes on individual fields:
 - `computed.position` and `computed.z_index` (the CSS values, `null` for `auto`) are what the
   `modal` classifier reads to spot overlays.
 - `computed.href` is the browser-resolved absolute URL (it honors `<base href>`) on links, `null` elsewhere.
-- Input `value` is deliberately **not** captured, so filled-in passwords never reach output JSON.
+- Input `value` (what a user has typed) is deliberately **not** captured, and a password
+  field's markup `value` *attribute* is recorded as `"[redacted]"`, so password values never reach
+  output JSON.
 - Non-rendered tags (`script`, `style`, `head`, `title`, `meta`, `link`, `template`, `noscript`, `base`) are skipped; everything else is captured.
 
 ## Discovery and the manifest
@@ -350,12 +387,91 @@ of distinct pages. With 200 product links and `max_pages=50`, `/about` still get
   `complete` means pages may be missing. `manifest_path` is written even on interruption.
 - `status` is `pending`, `extracted`, or `failed`. A page that fails to load, or whose
   elements can't be read, is recorded as `failed` with an `error`, and the crawl continues.
-- `page_type` comes from [`classify`](#page-classification) by default. Pass your own
+- `page_type` comes from [`classify`](#page-classification) by default. It is provisional:
+  extraction re-classifies each page from its fresh elements and writes the final type back.
+   Pass your own
   `classifier=(elements, url) -> str`, or `classifier=None` to skip classification (every
   page is then `"unknown"`).
 - `on_page_discovered=` is called once per new manifest entry as it is recorded.
 
 Manifest writes are atomic (temp file + rename), so a crash never leaves a truncated file.
+
+## Extraction and output
+
+`ElementExtractor(driver, config).extract(manifest)` is the second stage. For each page in the manifest,
+in order, it navigates, waits for load, extracts every element at full detail, writes the
+page's JSON, marks the manifest entry `extracted`, and moves on. It is **sequential by design**
+— it keeps fingerprint-store writes ordered and makes resume simple — so don't parallelize it
+without revisiting that.
+
+`manifest` is a `Manifest` or a path to one. Progress is saved to `<output_path>/manifest.json`
+(or `manifest_path=`) after every page. The call returns the updated `Manifest`.
+
+### Config
+
+`ExtractionConfig` is the `crawl.extraction` block of the run config:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `sequence` | `"one_by_one"` | The only supported value today |
+| `output_format` | `"json"` | The only supported value today |
+| `output_path` | `"./output/"` | Where `manifest.json` and `pages/` go |
+| `iframe_traversal` | `true` | Merge same-origin frames' elements in; `false` reads the main frame only (open shadow roots are still pierced) |
+| `platform_detection` | `"auto"` | `auto` or `off`. Validated, but acts only once the platform adapters land; `platform_detected` stays `null` until then |
+
+### Output layout
+
+```text
+output/
+  manifest.json
+  pages/
+    0001-example.com.json
+    0002-example.com-orders-42.json
+```
+
+A page's `output_file` in the manifest is relative to `output_path`. File names use the page's
+1-based position in the manifest (unique and stable) plus a readable slug of its URL. Files are
+written atomically.
+
+### Page JSON
+
+```json
+{
+  "schema_version": 1,
+  "run_id": "demo",
+  "url": "https://quotes.toscrape.com/login",
+  "page_type": "login",
+  "structural_hash": "3fa4f7fde11f3d63",
+  "captured_at": "2026-09-19T17:38:50.626Z",
+  "element_counts": {
+    "total": 28,
+    "visible": 27,
+    "in_shadow_root": 0,
+    "by_tag": { "a": 4, "body": 1, "div": 9, "footer": 1, "form": 1, "h1": 1, "html": 1, "input": 4, "label": 2, "p": 3, "span": 1 },
+    "by_frame": { "main": 28 }
+  },
+  "elements": [ "…each one in the raw element schema above…" ]
+}
+```
+
+`final_url` is added only when the page redirected. `page_type` and `structural_hash` are from
+the fresh extraction — if the structure changed since discovery, that is logged at `info`.
+`by_frame` keys are the `iframe_path` joined with `/`. Only the structural representative of a
+group of same-template pages is extracted; the others are listed under its `variant_urls`.
+
+### Failures, resume, and events
+
+- A page that fails to load or read is marked `failed` with its `error`, and the run continues.
+- The output file is written **before** the manifest records it, so a crash in between just
+  means the page is extracted again — the manifest never points at a file that isn't there.
+- `classifier=` re-classifies each page (default `healix.classification.classify`; `None`
+  keeps the discovery-time type). `on_page_extracted=` receives an `ExtractedPage` (`url`,
+  `page_type`, `element_count`, `output_file`) — the fields of the planned `page_extracted`
+  event.
+
+> **Output files are sensitive.** They record page markup as found: attribute values, link
+> URLs (which can carry tokens), and hidden-input values such as CSRF tokens. Only a password
+> field's markup `value` is redacted. `output/` is git-ignored by default; keep it that way.
 
 ## Page classification
 
@@ -475,6 +591,9 @@ These are fixed unless explicitly reopened:
 - **Closed shadow roots** are not reachable.
 - **Cross-origin iframes** are listed but not extracted, and a same-origin frame nested
   inside a cross-origin one is skipped too.
+- **Extraction reads a page as a fresh, anonymous visit.** Client-side state, filled-in forms,
+  and anything behind a login are not reproduced (login handling is planned). If a page
+  redirects to a login page, that is what gets extracted — and classified.
 - **Script-only navigation** — buttons and router pushes with no `<a href>` — is invisible
   to discovery.
 - **Client-rendered sites that never go network-idle** may be read before they finish
@@ -488,12 +607,12 @@ These are fixed unless explicitly reopened:
 
 ## Roadmap
 
-| Phase | Scope | Status |
+| Milestone | Scope | Status |
 |---|---|---|
 | 1 | `Driver` ABC, Playwright adapter, iframe + shadow DOM traversal, ID normalization | ✅ Done |
-| 2 | Phase A discovery, manifest, dedup, per-page status | ✅ Done |
+| 2 | Discovery, manifest, dedup, per-page status | ✅ Done |
 | 3 | Rule-based page classification (`login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`), and logquill-based logging | ✅ Done |
-| 4 | Phase B sequential extraction — one JSON file per page | Planned |
+| 4 | Sequential extraction — one JSON file per page, resumable | ✅ Done |
 | 5 | SDK (`Crawler`, `Extractor`, `Healer`, `ScriptGenerator`), CLI, event schema and webhooks | Planned |
 | 6 | Auto-detected login with `.env` credentials, MFA abort, mid-crawl re-login | Planned |
 | 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, SQLite/Postgres store | Planned |

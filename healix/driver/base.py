@@ -119,7 +119,7 @@ class Driver(ABC):
         """Resolve ``fingerprint`` via its primary locators.
 
         Raises ``ElementNotFoundError`` when none resolve to exactly one element.
-        Score-based healing on top of this is Phase 7.
+        Score-based healing on top of this is planned.
         """
 
     @abstractmethod
@@ -129,8 +129,13 @@ class Driver(ABC):
     def write(self, text: str, into: Target) -> None: ...
 
     @abstractmethod
-    def get_elements(self) -> list[Element]:
-        """Every element on the page, merged across same-origin frames and open shadow roots."""
+    def get_elements(self, *, iframe_traversal: bool = True) -> list[Element]:
+        """Every element on the page, including those in open shadow roots.
+
+        With ``iframe_traversal`` (the default) elements of every same-origin frame
+        are merged in, each tagged with its ``iframe_path``; without it only the main
+        frame is read.
+        """
 
     @abstractmethod
     def get_frames(self) -> list[Frame]:

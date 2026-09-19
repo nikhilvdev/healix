@@ -477,7 +477,13 @@ def _has_pagination(f: _Features) -> bool:
     ]
     directions = {_page_direction(t) for t in controls}
     numbered = sum(bool(_PAGE_NUMBER.match(t)) for t in controls)
-    return "next" in directions and ("prev" in directions or numbered >= 2)
+    # Page 1 of a list has no "Previous", so a lone "Next" *link* is enough. A "Next" *button*
+    # is more likely a wizard step, so a button needs a "Previous" or page numbers to count.
+    next_link = any(
+        _page_direction(n.text or n.el.attributes.get("aria-label", "").lower()) == "next"
+        for n in f.links
+    )
+    return "next" in directions and ("prev" in directions or numbered >= 2 or next_link)
 
 
 def _page_direction(text: str) -> str | None:

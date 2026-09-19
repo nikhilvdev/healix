@@ -327,3 +327,11 @@ def test_parent_selectors():
     ]
     assert list(_parent_selectors("#host #inner > input")) == ["#host #inner", "#host"]
     assert list(_parent_selectors("#solo")) == []
+
+
+def test_a_lone_next_link_is_pagination_but_a_lone_next_button_is_not():
+    rows = [*_rows(6), *_row_children(6)]
+    link = classify_page([*rows, el("a", text="Next", href="?page=2")])
+    button = classify_page([*rows, el("button", text="Next")])
+    assert "pagination" in link.signals["list"]
+    assert "pagination" not in button.signals.get("list", [])

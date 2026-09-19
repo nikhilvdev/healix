@@ -103,10 +103,11 @@ class PlaywrightDriverAdapter(Driver):
             name_of=_frame_label,
         )
 
-    def get_elements(self) -> list[Element]:
-        return collect_elements(
-            self.get_frames(), lambda frame: frame.handle.evaluate(COLLECT_ALL_JS)
-        )
+    def get_elements(self, *, iframe_traversal: bool = True) -> list[Element]:
+        frames = self.get_frames()
+        if not iframe_traversal:
+            frames = frames[:1]  # the main frame is always first
+        return collect_elements(frames, lambda frame: frame.handle.evaluate(COLLECT_ALL_JS))
 
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)

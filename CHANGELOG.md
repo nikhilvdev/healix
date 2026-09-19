@@ -4,13 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. Phases 1–3 of the build plan are
-implemented; extraction output, login, healing, the Selenium adapter, script generation,
-and the SDK/CLI/event surface are not.
+Pre-release: nothing is published to PyPI yet. The first four milestones of the build
+plan are implemented; login, healing, the Selenium adapter, script generation, and the
+SDK/CLI/event surface are not.
 
 ### Added
 
-- **Rule-based page classification (Phase 3).**
+- **Sequential, resumable extraction.**
+  - `ElementExtractor` in `healix.extraction` walks the manifest one page at a time — navigate,
+    wait for load, extract every element at full detail, write the page's JSON, mark the entry
+    `extracted` — and writes `output/manifest.json` plus `output/pages/NNNN-<slug>.json`.
+  - Page JSON: `schema_version`, `run_id`, `url` (and `final_url` on redirect), `page_type`,
+    `structural_hash`, `captured_at`, `element_counts` (total, visible, in shadow roots, by tag,
+    by frame) and `elements`. Files are written atomically.
+  - Resumable: the manifest is saved after every page. Re-running continues from the pages that
+    are not `extracted`; failed pages are retried; an `extracted` page whose output file is
+    missing is extracted again. The file is written before the manifest records it.
+  - A page that fails to load or read is marked `failed` with its error and the run continues.
+  - Each page is re-classified from its fresh elements, so the manifest's provisional
+    discovery-time `page_type` becomes the final one. Structure and type drift since discovery
+    are logged at `info`.
+  - `ExtractionConfig` (the `crawl.extraction` run-config block: `sequence`, `output_format`,
+    `output_path`, `iframe_traversal`, `platform_detection`) and an `on_page_extracted` hook
+    carrying the `page_extracted` event fields. `platform_detection` is validated but inert
+    until the platform adapters land.
+  - `healix.fs.write_json_atomic`, now also used by `Manifest.save`.
+
+- **Rule-based page classification.**
   - `classify(elements, url)` and `classify_page(elements, url)` in `healix.classification`
     label a page `login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`,
     `nav_shell`, `modal`, or `unknown`. Deterministic element-count and attribute heuristics
@@ -33,7 +53,7 @@ and the SDK/CLI/event surface are not.
   Discovery now logs start and finish at `info`, and each discovered page at `debug`.
 - `computed.position` and `computed.z_index` on every extracted element.
 
-- **Driver abstraction (Phase 1).**
+- **Driver abstraction.**
   - `Driver` ABC (`navigate`, `find`, `click`, `write`, `get_elements`, `get_frames`,
     `screenshot`, plus `current_url` and optional `start`/`close` lifecycle hooks) and the
     `Element`, `Frame`, and `ElementNotFoundError` types.
@@ -55,7 +75,7 @@ and the SDK/CLI/event surface are not.
   - `Fingerprint` with ordered primary locators (stable attributes → id → name → aria-label →
     css → xpath → normalized id → text); `driver.find(fingerprint)` resolves through them and
     rejects ambiguous matches.
-- **Discovery and manifest (Phase 2).**
+- **Discovery and manifest.**
   - `DiscoveryCrawler`: a link walk from one or more start URLs with no depth cutoff and a
     `max_pages` safety ceiling counted in page visits.
   - `DiscoveryConfig` (`domain_scope`, `max_pages`, `dedupe_by`, `template_sample_size`).
@@ -70,13 +90,20 @@ and the SDK/CLI/event surface are not.
   - Pages that fail to load, or whose elements can't be read, are recorded as `failed` and
     the crawl continues; `manifest_path` is written even when discovery is interrupted.
   - Optional `classifier` and `on_page_discovered` hooks for the classification and event
-    phases.
+    work.
 - Packaging and project scaffolding: `pyproject.toml` (hatchling, `playwright`/`dev`/`docs`
   extras, `py.typed`), CI, release and docs workflows, issue and PR templates, dependabot,
   pre-commit, `.env.example`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, and
   the MIT `LICENSE`.
 
 ### Changed
+
+- **`Driver.get_elements()` takes a keyword-only `iframe_traversal: bool = True`.** With `False`
+  only the main frame is read (open shadow roots are still pierced). Custom `Driver`
+  implementations must accept the keyword.
+- `Manifest.save` writes non-ASCII characters as-is instead of `\uXXXX` escapes.
+- A lone "Next" *link* now counts as list pagination (page 1 of a list has no "Previous"); a lone
+  "Next" *button* still does not.
 
 - **New runtime dependency: `logquill>=1.0`** (itself dependency-free). Healix previously had
   none.
@@ -92,6 +119,12 @@ and the SDK/CLI/event surface are not.
   (honoring `<base href>`).
 
 ### Fixed
+
+- **A password field's markup `value` attribute was captured verbatim** into an element's
+  `attributes`. It is now recorded as `"[redacted]"`. This mattered from the moment extraction
+  began writing files: without it, `<input type="password" value="…">` would have put the secret
+  in the output JSON. Only password fields are redacted; hidden-input values (e.g. CSRF tokens)
+  are still recorded as found, which is why the README warns that output files are sensitive.
 
 - Detached frames left in Playwright's `child_frames` after a re-navigation are no longer
   walked, which had produced phantom duplicate frames with mangled labels.

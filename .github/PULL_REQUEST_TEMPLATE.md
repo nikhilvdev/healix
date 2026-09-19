@@ -14,7 +14,7 @@
 - [ ] No LLM call added to the crawl/discover/classify/extract path
 - [ ] No credentials in `run_config.json` or any committed file (secrets live in `.env` only)
 - [ ] If this adds a page type, locator strategy, or event type, the matching table in the
-      README / `CLAUDE.md` is updated in the same change
+      README is updated in the same change
 
 ## Scope
 

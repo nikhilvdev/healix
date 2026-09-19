@@ -1,8 +1,8 @@
-"""Phase A — discovery.
+"""Discovery: find every reachable page.
 
 Walks links from the start point(s), visiting every distinct in-scope page.
 There is no depth cutoff: it runs until the frontier is empty or the
-``max_pages`` safety ceiling is hit. Extraction is Phase B and lives elsewhere;
+``max_pages`` safety ceiling is hit. Extraction is a separate step and lives elsewhere;
 discovery only records what exists.
 
 Links come from ``Driver.get_elements()``, so anchors inside same-origin

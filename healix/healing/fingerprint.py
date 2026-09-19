@@ -1,8 +1,9 @@
 """Element fingerprints.
 
-Phase 1 only needs enough of a fingerprint for ``Driver.find`` to resolve one:
+For now this only holds enough of a fingerprint for ``Driver.find`` to resolve one:
 the stored identity of an element plus the ordered list of primary locators
-derived from it. Phase 7 extends this module (weights, history, persistence).
+derived from it. The self-healing work will extend this module (weights, history,
+persistence).
 """
 
 from __future__ import annotations
