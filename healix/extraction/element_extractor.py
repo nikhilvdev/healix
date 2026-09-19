@@ -53,6 +53,8 @@ from healix.discovery.manifest import (
 )
 from healix.driver.base import Driver, Element
 from healix.fs import write_json_atomic
+from healix.healing.baseline import KEEP, MODES, record_page
+from healix.healing.store import FingerprintStore
 from healix.log import get_logger
 from healix.timeutil import iso_utc, utc_now
 
@@ -188,6 +190,11 @@ class ElementExtractor:
     continues from where it stopped. If that cannot be done the page is marked ``failed``
     (and the manifest ``blocked_on_auth`` when no credentials are set). Login detection
     relies on the classifier, so it needs ``classifier`` to be set.
+
+    With a ``fingerprint_store`` every element a script would act on is fingerprinted as its page
+    is extracted — the baseline the healer later repairs against. ``fingerprint_mode="keep"``
+    (default) adds only roles the store has not seen, so an existing baseline is never silently
+    overwritten; ``"refresh"`` overwrites it.
     """
 
     def __init__(
@@ -199,13 +206,19 @@ class ElementExtractor:
         on_page_extracted: Callable[[ExtractedPage], None] | None = None,
         clock: Callable[[], datetime] = utc_now,
         authenticator: Authenticator | None = None,
+        fingerprint_store: FingerprintStore | None = None,
+        fingerprint_mode: str = KEEP,
     ) -> None:
+        if fingerprint_mode not in MODES:
+            raise ValueError(f"fingerprint_mode must be one of {MODES}, got {fingerprint_mode!r}")
         self.driver = driver
         self.config = config or ExtractionConfig()
         self.classifier = classifier
         self.on_page_extracted = on_page_extracted
         self.clock = clock
         self.authenticator = authenticator
+        self.fingerprint_store = fingerprint_store
+        self.fingerprint_mode = fingerprint_mode
 
     def extract(
         self,
@@ -327,6 +340,7 @@ class ElementExtractor:
                 discovered=previous_type,
                 now=page_type,
             )
+        self._record_fingerprints(page.url, elements)
         page.page_type = page_type
         manifest.mark_extracted(page.url, relative)
         logger.debug(
@@ -346,6 +360,29 @@ class ElementExtractor:
                 )
             )
         return True
+
+    def _record_fingerprints(self, page_url: str, elements: list[Element]) -> None:
+        if self.fingerprint_store is None:
+            return
+        try:
+            summary = record_page(
+                self.fingerprint_store, page_url, elements, mode=self.fingerprint_mode
+            )
+        except Exception as exc:  # the page is extracted; a store problem must not lose it
+            logger.warn(
+                "could not record fingerprints",
+                url=page_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return
+        logger.debug(
+            "fingerprints recorded",
+            url=page_url,
+            added=summary.added,
+            refreshed=summary.refreshed,
+            kept=summary.kept,
+        )
 
     def _classify(self, elements: list[Element], final_url: str, page: ManifestPage) -> str:
         return self.classifier(elements, final_url) if self.classifier else page.page_type

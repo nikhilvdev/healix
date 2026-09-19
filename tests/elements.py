@@ -20,9 +20,17 @@ def el(
     visible=True,
     enabled=True,
     iframe=("main",),
+    xpath=None,
+    dom=None,
+    shadow=(),
+    box=None,
+    href=None,
     **attrs,
 ):
-    """An Element. ``attrs`` become HTML attributes (``aria_label`` -> ``aria-label``)."""
+    """An Element. ``attrs`` become HTML attributes (``aria_label`` -> ``aria-label``).
+
+    ``dom`` is the ``dom_context`` dict; ``box`` is ``(width, height)``; ``href`` the resolved link.
+    """
     return Element.from_dict(
         {
             "tag": tag,
@@ -31,8 +39,24 @@ def el(
             "classes": list(classes),
             "attributes": {k.replace("_", "-"): v for k, v in attrs.items()},
             "text_content": text,
-            "computed": {"visible": visible, "enabled": enabled},
+            "computed": {
+                "visible": visible,
+                "enabled": enabled,
+                **(
+                    {
+                        "bounding_box": dict(
+                            zip(("x", "y", "width", "height"), (0, 0, *box), strict=True)
+                        )
+                    }
+                    if box
+                    else {}
+                ),
+                **({"href": href} if href else {}),
+            },
+            "xpath": xpath,
             "css_selector": sel or f"html > body > {tag}:nth-of-type({next(_ids)})",
+            "dom_context": dom or {},
+            "shadow_path": list(shadow),
         },
         iframe_path=list(iframe),
     )

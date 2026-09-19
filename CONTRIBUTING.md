@@ -21,6 +21,8 @@ pytest
 
 Python 3.10+ is required. The browser tests launch real headless Chromium and skip
 themselves if Playwright or its browsers aren't installed.
+The PostgreSQL store tests need a real server: set `HEALIX_TEST_POSTGRES_URL`, or have Docker
+running and they start a throwaway `postgres:16-alpine` container. CI provides one as a service.
 
 ## Pull request strategy
 
@@ -74,8 +76,12 @@ raised as an issue and discussed *before* code is written.
   Not stdlib `logging`, not `print`. Never log credentials, tokens, cookies, or input values.
 - **Capture full detail at extraction time.** Never a curated subset, never deferred to a
   later pass.
-- **Healing must reject weak matches.** Attribute weights are unequal (stable signals over
-  volatile ones), and a candidate below the confidence threshold is rejected, not used.
+- **Healing must reject weak matches, and every heal is audited.** Attribute weights are unequal
+  (stable signals over volatile ones), and a candidate below the confidence threshold is rejected,
+  not used. The confidence gate, the verification of non-first locator matches, the ambiguity guard,
+  the canvas boundary, and the atomic fingerprint-plus-history write are each covered by a test that
+  fails if the rule is removed; keep it that way. Recalibrating `WEIGHTS` means re-running the
+  real-browser healing tests and updating the README's weights table.
 
 ## Keeping the docs and the code in sync
 
@@ -84,8 +90,10 @@ Some things are documented in more than one place. Change them together:
 - **A new page type** → the classification table in the README and `classification/rules.py`
   (a test fails if the two disagree). Add a rendered fixture page for it, plus one for any
   look-alike it could be confused with.
-- **A new locator strategy** → its priority position in `healing/scorer.py` and in the
-  README's description of the resolver.
+- **A change to the `FingerprintStore` interface** → both backends, and the shared contract tests in
+  `tests/healing/test_store.py` (they run against SQLite and PostgreSQL).
+- **A new locator strategy** → its priority position in `healing/scorer.py` (`LOCATOR_PRIORITY`, kept
+  in step with `Fingerprint.locators` by a test) and in the README's description of the resolver.
 - **A new event type** → `events/schema.py` and the README's event table, in the same change (a
   test fails if the two disagree). Emit it through `EventEmitter` so the SDK callback and the
   webhook see the same payload.

@@ -12,10 +12,10 @@ external orchestration platforms through an SDK, a CLI, and webhooks.
 **Status: pre-release, under active development.** The driver abstraction (Playwright),
 iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
-surface are implemented and tested, and so is automatic login (username/password, SSO, session
-expiry). The healing scorer and store, the Selenium adapter, and script generation are **not
-built yet** — see the [Roadmap](#roadmap) and
-`CHANGELOG.md`. Nothing is published to PyPI yet.
+surface are implemented and tested, and so are automatic login (username/password, SSO, session
+expiry) and self-healing (weighted, threshold-gated, persisted, audited). The Selenium adapter and
+script generation are **not built yet** — see the [Roadmap](#roadmap) and `CHANGELOG.md`. Nothing
+is published to PyPI yet.
 
 ## Features
 
@@ -67,8 +67,13 @@ Available now:
   again and resumes. It aborts cleanly on MFA, never submits a password twice, and never types
   credentials where it shouldn't — see [Authentication](#authentication)
 
-Planned (see [Roadmap](#roadmap)): weighted and threshold-gated self-healing with a persistent
-fingerprint store, a Selenium adapter, and script generation.
+- **Self-healing locators** — when a stored locator stops matching, every same-tag element is scored
+  against the element's fingerprint with *weighted* signals (test id and aria-label count for far
+  more than a generated id), and the best is accepted only above a confidence threshold. The fix is
+  persisted and every heal is audited as routine churn or a possible regression. It refuses rather
+  than guess — see [Self-healing](#self-healing)
+
+Planned (see [Roadmap](#roadmap)): a Selenium adapter and script generation.
 
 ## Install
 
@@ -84,7 +89,8 @@ playwright install chromium
 ```
 
 Requires Python 3.10+. This also installs the `healix` command. Runtime dependencies are
-`logquill` (logging) and `python-dotenv` (the CLI loads `.env`); Playwright is an optional extra.
+`logquill` (logging) and `python-dotenv` (the CLI loads `.env`). Playwright is an optional extra, and
+so is `healix[postgres]` (the `psycopg` driver, only needed to keep fingerprints in PostgreSQL).
 
 ## Quickstart
 
@@ -325,8 +331,9 @@ from healix import Crawler, Extractor
 
 | | |
 |---|---|
-| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True)` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
-| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True)` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
+| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `Healer(store=None, *, driver=None, threshold=0.5, ambiguity_margin=0.05, run_id=None, on_event=None, webhook_url=None, ...)` | Records fingerprints and finds elements again after the page changes — see [Self-healing](#self-healing) |
 
 `config` is a path to a run-config JSON, a dict, or a `RunConfig`. Both calls return a `Run`:
 `run.run_id`, `run.pages` (manifest entries), `run.pages_discovered`, `run.pages_extracted`,
@@ -361,9 +368,11 @@ to resume it, or choose another output path.
 
 ```bash
 healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only]
-               [--webhook-url URL] [--headed] [--no-login] [--json] [--log-level LEVEL]
+               [--webhook-url URL] [--headed] [--no-login] [--fingerprint-db PATH]
+               [--json] [--log-level LEVEL]
 healix extract --manifest output/manifest.json [--config run_config.json]
-               [--webhook-url URL] [--headed] [--no-login] [--json] [--log-level LEVEL]
+               [--webhook-url URL] [--headed] [--no-login] [--fingerprint-db PATH]
+               [--json] [--log-level LEVEL]
 healix --version          # also: python -m healix
 ```
 
@@ -376,6 +385,7 @@ healix --version          # also: python -m healix
 - `--json` prints the run summary as one JSON line on stdout instead of the human text. Logs go to
   stderr (JSON lines, `WARN` and above by default; `--log-level` changes it).
 - `--no-login` turns automatic login off.
+- `--fingerprint-db PATH` records an element fingerprint for every actionable element to a SQLite file as pages are extracted — the baseline for [self-healing](#self-healing).
 - The CLI loads a `.env` from the current directory (that is where the login credentials can live).
 
 | Exit status | Meaning |
@@ -413,9 +423,8 @@ it is final. A `login_failed` `reason` is one of `mfa_required`, `timeout`, `sel
 
 **Emitted today:** `page_discovered` (once per new manifest entry), `page_extracted` (once per page
 written), `login_failed` (once per failed login — see [Authentication](#authentication)), and
-`run_complete` (last). **Defined but not emitted yet:** `element_healed` and `script_generated` —
-they arrive with self-healing and script generation. The schema, in `healix.events`, already
-includes them.
+`run_complete` (last). `element_healed` is emitted by `Healer` (see [Self-healing](#self-healing)).
+**Defined but not emitted yet:** `script_generated`, which arrives with script generation.
 
 A `login_failed` `url` never carries a query string (SSO redirect URLs hold `state` and `code`),
 and `screenshot_ref` is a path relative to the output directory, or `null`.
@@ -534,6 +543,163 @@ The credentials are never logged, never put in an event, and never written to di
 that neither it nor the username appears in any log record, event, summary, manifest, or output
 file.
 
+## Self-healing
+
+A script that finds `#user-4471` breaks the day the id becomes `user-9032`. Healix records a
+**fingerprint** of every actionable element — everything extraction captured about it — and when a
+locator stops matching, it finds the element again by *resemblance*, then repairs the fingerprint.
+
+```python
+from healix import Healer
+
+with Healer("healix.db") as healer:
+    healer.learn("https://shop.example.com/login")            # record the baseline once
+
+    # ... later, after the page has changed ...
+    healer.write("alice", "https://shop.example.com/login", "textbox:login-username")
+    healer.click("https://shop.example.com/login", "button:login-submit")
+```
+
+Fingerprints usually come from a crawl: `healix crawl --config run_config.json --fingerprint-db
+healix.db`, or `Crawler(config, fingerprint_store="healix.db")`. Each is stored under
+`(page_url, element_role)`. A **role** is a stable name built from the element's most durable
+identity — `textbox:login-username`, `button:sign-in`, `link:forgot-password` — with repeats numbered
+`#2`, `#3`. Recording keeps an existing baseline (`fingerprint_mode="keep"`); pass `"refresh"` to
+overwrite it after an intended redesign.
+
+### How an element is found
+
+1. **Primary locators, in priority order:** stable test attributes (`data-testid`, `data-test`,
+   `data-qa`, `data-cy`, …) → `id` → `name` → `aria-label` → css → xpath → normalized id → text. The
+   first that matches exactly one element wins. A test id, id, name, or aria-label is trusted when it
+   is the *first* locator tried. Any other match is **verified** against the fingerprint and rejected
+   if it doesn't resemble the stored element — a locator that matches *something* isn't necessarily
+   matching *the element*.
+2. **Scoring.** If no locator survives, every element with the same tag is scored against the
+   fingerprint.
+3. **The gate.** The best candidate must reach the confidence **threshold** (default `0.5`,
+   configurable), and must not be a near-tie with the runner-up (`ambiguity_margin`, default `0.05`).
+   A best-but-weak or ambiguous match is **rejected** with `ElementNotHealedError` — never silently
+   used. A page drawn on a canvas raises `UnsupportedRenderingError` instead (see below).
+
+### How candidates are scored
+
+The score is a weighted comparison, not a flat one. Stable signals count for far more than volatile
+ones:
+
+| Signal | Weight | Signal | Weight |
+|---|---|---|---|
+| stable test attribute | 0.25 | other attributes (`type`, `href`, …) | 0.08 |
+| name | 0.12 | DOM path (ancestor tags) | 0.08 |
+| visible text | 0.12 | `id` (raw, or same after normalizing) | 0.04 |
+| nearby label text | 0.12 | classes | 0.04 |
+| aria-label | 0.10 | parent · sibling index | 0.03 · 0.02 |
+
+Three rules decide how they combine:
+
+- **A signal missing on either side is neutral, not a mismatch.** A developer stripping a test id
+  doesn't make the element a different one. A *different value* is a mismatch.
+- The score is the weighted mean of the signals that *could* be compared, **damped by how much
+  evidence there was**: a candidate that can only be compared on one or two weak signals can't score
+  high however well they match.
+- Text-like signals are rescaled so merely *unrelated* strings score 0 rather than a comfortable 0.3.
+
+A scored heal's `healed element` log record (at `info` level) lists each signal's similarity, and
+`Score.explain()` returns the same, so a surprising heal is debuggable.
+
+### What it does on a real page
+
+One URL, changing between "deploys" (from the integration tests; roles are the username and password
+fields and the submit button):
+
+| The page changes to… | Result | Confidence |
+|---|---|---|
+| only generated `id`s regenerated | found exactly by the test id — nothing to heal | — |
+| ids, classes regenerated; test ids stripped | healed via `name` (fields), `text` (button); **churn** | 0.87 · 0.87 · 0.66 |
+| heavy refactor: new wrappers, ids, classes; no test ids, names or aria-labels | healed by **weighted score** (fields), `text` (button); **churn** | 0.54 · 0.51 · 0.58 |
+| a field's label becomes "Email address or mobile number" | healed via `name`, flagged **regression** | 0.75 |
+| the form is removed; only a search box remains | **refused** — best candidate 0.13 | — |
+| two indistinguishable text boxes | **refused** — below threshold (or ambiguous) | 0.42 |
+| the UI is drawn on a `<canvas>` | **refused** with `UnsupportedRenderingError` | — |
+
+Note the heavy refactor: the healed fields clear the threshold by a hair (0.51, 0.54). The gate is
+real, and a redesign that also changes labels or types will not pass it.
+
+### The healing history
+
+Every heal replaces the fingerprint **and** appends a record to the history, in one transaction, so
+the fix survives future runs and the store never holds one without the other. A record carries the
+old and new fingerprints, the old and new locators, the strategy, the confidence, and which fields
+changed — and a verdict on *what kind* of change it was:
+
+- **`churn`** — ids, classes, test ids, name attributes, DOM position. The handles moved; the element
+  did not. Routine and harmless.
+- **`regression`** — the element's visible meaning changed: a different tag, input `type` or `role`,
+  or text, accessible name, placeholder or label that no longer resembles the old. A healed script
+  would keep passing while the product changed underneath it, so this deserves a look.
+
+```python
+healer.history(change_kind="regression")    # heal records, newest first
+healer.report()                              # per element: heals, churn, regressions
+```
+
+`healer.report()` ranks elements by how often they heal — the flaky locators worth stabilizing.
+
+### Events
+
+Each heal emits an `element_healed` event through `on_event` / `webhook_url` — the same payloads as
+every other event:
+
+```json
+{"event": "element_healed", "run_id": "demo", "timestamp": "2026-09-19T18:59:00.860Z", "data": {"element_key": "https://shop.example.com/login#textbox:login-username", "old_locator": "stable_attr:data-testid=[data-testid=\"login-username\"]", "new_locator": "id=[id=\"f_8d2a\"]", "strategy_used": "name", "confidence_score": 0.873, "page_url": "https://shop.example.com/login"}}
+```
+
+`strategy_used` is the locator strategy that matched, or `weighted_score` for a scored heal.
+
+### The store
+
+Two backends implement the same `FingerprintStore` interface (`get`, `put`, `put_if_absent`,
+`fingerprints`, `apply_heal`, `history`, `close`), and one contract test suite runs against both:
+
+| | Use | Opened with |
+|---|---|---|
+| **SQLite** (default) | one file, no extra dependency (stdlib `sqlite3`) | a path: `Healer("healix.db")` |
+| **PostgreSQL** | fingerprints shared across machines or CI runs | a URL: `Healer("postgresql://user:pass@host:5432/db")` |
+
+The path or URL is accepted everywhere a store is: `Healer(...)`, `Crawler(config, fingerprint_store=...)`,
+and `healix crawl --fingerprint-db ...`. You can also pass your own `FingerprintStore`.
+
+```bash
+pip install "healix[postgres]"      # adds the psycopg driver
+healix crawl --config run_config.json --fingerprint-db postgresql://user:pass@host:5432/healix
+```
+
+- **Both** are safe to share between threads, refuse a database written by a newer Healix, and write a
+  heal's fingerprint update and its history record in **one transaction**.
+- **PostgreSQL** creates three tables, `healix_meta`, `healix_fingerprints`, and
+  `healix_healing_history`, in the connection's default schema on first use (prefixed, so they can
+  share a database with other applications). JSON columns are `JSONB`, so the audit trail is
+  queryable in SQL, e.g. `SELECT … FROM healix_healing_history WHERE change_kind = 'regression'`.
+  Several processes starting at once is safe (schema creation takes an advisory lock).
+- The connection URL usually carries a password. It is never logged and is masked in `repr` and in
+  error messages, even if a driver echoes it.
+
+### The canvas boundary
+
+**Canvas-rendered UI is unsupported, and the healer fails cleanly on it.** Some Dynamics 365 canvas
+apps and legacy Java-applet Oracle Forms draw their UI instead of building it from DOM elements, so
+there is nothing for any locator to find. When healing fails on a page that is essentially one
+canvas (or plugin object) with almost no DOM controls, `Healer` raises `UnsupportedRenderingError`
+with an explanation — not a low-confidence guess.
+
+### Limits
+
+- Only elements that were **fingerprinted** can be healed, and only among **same-tag** candidates.
+- Roles are derived from an element's identity; if that identity changes, so does the role a fresh
+  crawl would assign. Heal against the stored role, and `refresh` after an intended redesign.
+- The threshold and weights are heuristics calibrated on realistic test pages, not learned from your
+  site. Expect to tune `threshold` — and read the regression flags.
+
 ## How it works
 
 Healix crawls in two stages rather than as a depth-limited breadth-first walk.
@@ -626,7 +792,8 @@ Every element captures maximum raw detail at extraction time. This is real outpu
     "parent_tag": "p",
     "parent_id": null,
     "sibling_index": 0,
-    "nearby_label_text": null
+    "nearby_label_text": null,
+    "tag_path": ["html", "body", "div", "p", "a"]
   },
   "shadow_path": []
 }
@@ -636,6 +803,9 @@ Notes on individual fields:
 
 - `attributes` holds every attribute except `id`, `class`, and `name`, which have their own fields.
 - `text_content` is the element's **own** text nodes only, so parents don't repeat their children's text.
+- `dom_context.tag_path` is the ancestor tag names from the root down to the element. Unlike
+  `xpath` and `css_selector` it is not shortened by an `id` anchor, so it still says where an
+  element sits — the healer uses it.
 - `xpath` is relative to the element's nearest root — the document, or its shadow root.
 - `bounding_box` is relative to the element's own frame viewport, not the page.
 - `computed.position` and `computed.z_index` (the CSS values, `null` for `auto`) are what the
@@ -928,8 +1098,11 @@ These are fixed unless explicitly reopened:
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
 - **Webhook delivery is best-effort**, not durable — see [Webhooks](#webhooks).
-- **`Healer`, `ScriptGenerator`, and `healix generate` do not exist yet**, and neither does the
-  Selenium backend (`backend: "selenium"` is accepted but raises).
+- **`ScriptGenerator` and `healix generate` do not exist yet**, and neither does the Selenium backend
+  (`backend: "selenium"` is accepted but raises).
+- **Healing is not a substitute for a test.** A healed element is *probably* the same one; it can be
+  wrong. That is why heals are confidence-gated and audited — read the [regression
+  flags](#the-healing-history) — and why a heavy refactor heals only just above the threshold.
 - **Classification is heuristic** — see [Accuracy and limits](#accuracy-and-limits).
 - **Login covers the common shapes only** — see [What it will not do](#what-it-will-not-do). A
   login that lives in a pop-up window or a cross-origin iframe is not handled. Login detection
@@ -945,14 +1118,14 @@ These are fixed unless explicitly reopened:
 | 4 | Sequential extraction — one JSON file per page, resumable | ✅ Done |
 | 5 | SDK (`Crawler`, `Extractor`), CLI (`crawl`, `extract`), event schema and webhooks | ✅ Done |
 | 6 | Auto-detected login with `.env` credentials, SSO, MFA abort, mid-crawl re-login | ✅ Done |
-| 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, SQLite/Postgres store | Planned |
+| 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, persistent store and history | ✅ Done (SQLite and PostgreSQL stores) |
 | 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | Planned |
 | 9 | Packaging, `healix doctor`, PyPI release | Planned |
 
 ### Still planned
 
-Not implemented yet — shown so the direction is clear. They will emit the same events
-(`element_healed`, `script_generated`, `login_failed`) through the same `on_event` and webhooks.
+Not implemented yet — shown so the direction is clear. It will emit `script_generated` through
+the same `on_event` and webhooks.
 
 ```python
 from healix import ScriptGenerator
@@ -965,7 +1138,6 @@ healix generate --input ./output/manifest.json --backend playwright --style pom
 healix doctor
 ```
 
-`Healer` (weighted, threshold-gated self-healing) joins the SDK with the healing milestone.
 
 ## API reference
 
@@ -997,6 +1169,10 @@ pytest
 The browser tests run real headless Chromium against small fixture sites served over local
 HTTP (including a second origin for the cross-origin cases); they skip themselves if
 Playwright or its browsers aren't installed.
+
+The PostgreSQL store tests need a real server. Set `HEALIX_TEST_POSTGRES_URL` to point at one (CI
+does, with a service container), or just have Docker running: the tests start a throwaway
+`postgres:16-alpine` container and remove it afterwards. With neither, they skip.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow, the
 [Code of Conduct](CODE_OF_CONDUCT.md) for community standards, and

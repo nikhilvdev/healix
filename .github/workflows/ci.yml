@@ -8,6 +8,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: healix
+          POSTGRES_PASSWORD: healix
+          POSTGRES_DB: healix
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U healix"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HEALIX_TEST_POSTGRES_URL: postgresql://healix:healix@localhost:5432/healix
     strategy:
       fail-fast: false
       matrix:

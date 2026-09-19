@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from healix.healing.fingerprint import Fingerprint
+from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
 
 MAIN_FRAME = "main"
@@ -128,6 +128,15 @@ class Driver(ABC):
         Raises ``ElementNotFoundError`` when none resolve to exactly one element.
         Score-based healing on top of this is planned.
         """
+
+    def locate(self, spec: LocatorSpec, fingerprint: Fingerprint) -> Element | None:
+        """The one element that a single locator strategy matches, or ``None``.
+
+        ``None`` means the locator matched nothing or was ambiguous (several elements). This is
+        what lets the healer see *which* strategy resolved a fingerprint; ``find`` is
+        ``locate`` tried down the priority list. Backends that support healing implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot locate by a single strategy")
 
     @abstractmethod
     def click(self, target: Target) -> None: ...

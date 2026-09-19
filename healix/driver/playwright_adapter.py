@@ -116,16 +116,25 @@ class PlaywrightDriverAdapter(Driver):
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)
         for spec in fingerprint.locators():
-            for frame in frames:
-                locator = self._resolve(spec, frame.handle, fingerprint)
-                if locator is not None:
-                    return Element.from_dict(
-                        locator.evaluate(DESCRIBE_ONE_JS), iframe_path=frame.path
-                    )
+            found = self._locate_in(spec, fingerprint, frames)
+            if found is not None:
+                return found
         raise ElementNotFoundError(
             f"no unique element for {fingerprint.element_role!r} on {fingerprint.page_url} "
             f"(tried {[s.strategy for s in fingerprint.locators()]})"
         )
+
+    def locate(self, spec: LocatorSpec, fingerprint: Fingerprint) -> Element | None:
+        return self._locate_in(spec, fingerprint, self._search_frames(fingerprint))
+
+    def _locate_in(
+        self, spec: LocatorSpec, fingerprint: Fingerprint, frames: list[Frame]
+    ) -> Element | None:
+        for frame in frames:
+            locator = self._resolve(spec, frame.handle, fingerprint)
+            if locator is not None:
+                return Element.from_dict(locator.evaluate(DESCRIBE_ONE_JS), iframe_path=frame.path)
+        return None
 
     def click(self, target: Target) -> None:
         self._locator_for(target).click()

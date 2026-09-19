@@ -63,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--no-login", action="store_true", help="do not log in when a login page is reached"
         )
+        p.add_argument(
+            "--fingerprint-db",
+            metavar="PATH",
+            help="record element fingerprints for later self-healing: a SQLite file path or a "
+            "postgresql:// URL",
+        )
         p.add_argument("--json", action="store_true", help="print the run summary as JSON")
         p.add_argument(
             "--log-level", choices=LOG_LEVELS, help="log level on stderr (default: warn)"
@@ -106,6 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 webhook_url=args.webhook_url,
                 headless=not args.headed,
                 auto_login=not args.no_login,
+                fingerprint_store=args.fingerprint_db,
             )
             run = runner.discover() if args.discover_only else runner.discover_and_extract()
         else:
@@ -115,6 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 webhook_url=args.webhook_url,
                 headless=not args.headed,
                 auto_login=not args.no_login,
+                fingerprint_store=args.fingerprint_db,
             )
             run = runner.extract(args.manifest)
     except KeyboardInterrupt:

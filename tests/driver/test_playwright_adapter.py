@@ -54,6 +54,7 @@ def test_extracts_light_dom_element_with_full_detail(page):
         "parent_id": "login",
         "sibling_index": 1,
         "nearby_label_text": "Username",
+        "tag_path": ["html", "body", "form", "input"],
     }
 
 

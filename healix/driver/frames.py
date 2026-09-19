@@ -103,6 +103,20 @@ function xpathOf(el, root) {
   return '/' + parts.join('/');
 }
 
+// Ancestor tag names from the root (document or shadow root) down to `el`. Unlike an xpath or css
+// selector it is not shortened by an id anchor, so it still describes where the element sits.
+function tagPath(el, root) {
+  const path = [];
+  let node = el;
+  while (node && node.nodeType === 1) {
+    path.unshift(node.localName);
+    const parent = node.parentNode;
+    if (!parent || parent === root) break;
+    node = parent;
+  }
+  return path;
+}
+
 function ownText(el) {
   let text = '';
   for (const n of el.childNodes) if (n.nodeType === 3) text += n.nodeValue;
@@ -182,6 +196,7 @@ function describe(el) {
       parent_id: parentEl ? (parentEl.getAttribute('id') || null) : null,
       sibling_index: siblings.indexOf(el),
       nearby_label_text: nearbyLabelText(el, root),
+      tag_path: tagPath(el, root),
     },
   };
 }

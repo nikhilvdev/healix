@@ -41,10 +41,13 @@ dependencies = ["logquill>=1.0", "python-dotenv>=1.0"]
 
 [project.optional-dependencies]
 # Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
-# Selenium adapter.
+# Selenium adapter. `postgres` is only needed to keep fingerprints in PostgreSQL.
 playwright = ["playwright>=1.40"]
+# Fingerprints in PostgreSQL instead of a local SQLite file.
+postgres = ["psycopg[binary]>=3.1"]
 dev = [
     "playwright>=1.40",
+    "psycopg[binary]>=3.1",
     "ruff>=0.6",
     "mypy>=1.11",
     "pytest>=8.0",
@@ -105,6 +108,8 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 "healix/driver/frames.py" = ["E501"]
 # The login test site is HTML written as Python strings.
 "tests/loginsite.py" = ["E501"]
+# Lazy exports: the TYPE_CHECKING block is a re-export list, not unused imports.
+"healix/healing/__init__.py" = ["F401"]
 
 [tool.mypy]
 strict = true

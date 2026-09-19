@@ -108,6 +108,7 @@ def test_crawl_passes_every_option_to_the_sdk(config_file):
         "webhook_url": "https://hooks.example/x",
         "headless": False,
         "auto_login": False,
+        "fingerprint_store": None,
     }
     assert crawler.config.extraction.output_path == "elsewhere"  # --output overrides the config
 
@@ -120,6 +121,7 @@ def test_crawl_defaults_are_headless_and_use_the_configured_output(config_file):
         "webhook_url": None,
         "headless": True,
         "auto_login": True,
+        "fingerprint_store": None,
     }
     assert crawler.config.extraction.output_path == "OUT"
 
@@ -286,3 +288,11 @@ def test_the_blocked_flag_is_in_the_json_summary(config_file, capsys):
 def test_extract_also_honours_no_login(config_file):
     cli.main(["extract", "--manifest", "m.json", "--no-login"])
     assert FakeCrawler.instances[0].kwargs["auto_login"] is False
+
+
+def test_fingerprint_db_is_passed_to_the_sdk_for_crawl_and_extract(config_file):
+    cli.main(["crawl", "--config", str(config_file), "--fingerprint-db", "fp.db"])
+    assert FakeCrawler.instances[0].kwargs["fingerprint_store"] == "fp.db"
+    FakeCrawler.instances.clear()
+    cli.main(["extract", "--manifest", "m.json", "--fingerprint-db", "other.db"])
+    assert FakeCrawler.instances[0].kwargs["fingerprint_store"] == "other.db"

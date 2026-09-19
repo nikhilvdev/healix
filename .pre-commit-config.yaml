@@ -11,7 +11,7 @@ repos:
     hooks:
       - id: mypy
         # mypy needs the types of healix's imports (playwright adapter, logquill) in the hook env.
-        additional_dependencies: [playwright, logquill, python-dotenv]
+        additional_dependencies: [playwright, logquill, python-dotenv, psycopg]
         args: [--strict, healix]
         pass_filenames: false
 

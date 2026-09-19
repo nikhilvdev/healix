@@ -58,6 +58,7 @@ from healix.events import (
 )
 from healix.extraction import ElementExtractor, ExtractedPage
 from healix.extraction.element_extractor import MANIFEST_FILENAME
+from healix.healing import KEEP, FingerprintStore, open_store
 from healix.log import get_logger
 
 logger = get_logger(__name__)
@@ -147,6 +148,8 @@ class _Runner:
         headless: bool,
         credentials: Credentials | None,
         auto_login: bool,
+        fingerprint_store: FingerprintStore | str | os.PathLike[str] | None,
+        fingerprint_mode: str,
     ) -> None:
         self.config = RunConfig.coerce(config, require_start=require_start)
         self.on_event = on_event
@@ -156,6 +159,9 @@ class _Runner:
         self.headless = headless
         self.credentials = credentials
         self.auto_login = auto_login
+        self._fingerprint_store = fingerprint_store
+        self.fingerprint_mode = fingerprint_mode
+        self._active_store: FingerprintStore | None = None
 
     @contextlib.contextmanager
     def _session(self, run_id: str) -> Iterator[tuple[Driver, EventEmitter]]:
@@ -170,6 +176,11 @@ class _Runner:
                 driver = create_driver(self.config.backend, headless=self.headless)
                 driver.start()
                 stack.callback(driver.close)
+            store = self._fingerprint_store
+            if store is not None and not isinstance(store, FingerprintStore):
+                store = open_store(store)  # a path or URL: opened here, closed here
+                stack.callback(store.close)
+            self._active_store = store
             yield driver, EventEmitter(run_id, on_event=self.on_event, sender=sender)
 
     def _login_handler(
@@ -246,6 +257,8 @@ class Crawler(_Runner):
         headless: bool = True,
         credentials: Credentials | None = None,
         auto_login: bool = True,
+        fingerprint_store: FingerprintStore | str | os.PathLike[str] | None = None,
+        fingerprint_mode: str = KEEP,
     ) -> None:
         super().__init__(
             config,
@@ -257,6 +270,8 @@ class Crawler(_Runner):
             headless=headless,
             credentials=credentials,
             auto_login=auto_login,
+            fingerprint_store=fingerprint_store,
+            fingerprint_mode=fingerprint_mode,
         )
         self.run_id = run_id
 
@@ -309,6 +324,8 @@ class Crawler(_Runner):
                     config.extraction,
                     on_page_extracted=lambda page: self._emit_extracted(emitter, page),
                     authenticator=login,
+                    fingerprint_store=self._active_store,
+                    fingerprint_mode=self.fingerprint_mode,
                 ).extract(manifest, manifest_path=manifest_path)
 
             self._emit_complete(emitter, manifest, manifest_path)
@@ -351,6 +368,8 @@ class Extractor(_Runner):
         headless: bool = True,
         credentials: Credentials | None = None,
         auto_login: bool = True,
+        fingerprint_store: FingerprintStore | str | os.PathLike[str] | None = None,
+        fingerprint_mode: str = KEEP,
     ) -> None:
         super().__init__(
             config,
@@ -362,6 +381,8 @@ class Extractor(_Runner):
             headless=headless,
             credentials=credentials,
             auto_login=auto_login,
+            fingerprint_store=fingerprint_store,
+            fingerprint_mode=fingerprint_mode,
         )
         self._explicit_config = config is not None
 
@@ -386,6 +407,8 @@ class Extractor(_Runner):
                 extraction,
                 on_page_extracted=lambda page: self._emit_extracted(emitter, page),
                 authenticator=login,
+                fingerprint_store=self._active_store,
+                fingerprint_mode=self.fingerprint_mode,
             ).extract(loaded, manifest_path=manifest_path)
             self._emit_complete(emitter, result, manifest_path)
         return Run(result.run_id, result, manifest_path, Path(extraction.output_path))

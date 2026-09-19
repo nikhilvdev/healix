@@ -1,15 +1,16 @@
 """Element fingerprints.
 
-For now this only holds enough of a fingerprint for ``Driver.find`` to resolve one:
-the stored identity of an element plus the ordered list of primary locators
-derived from it. The self-healing work will extend this module (weights, history,
-persistence).
+A ``Fingerprint`` is the stored identity of one element: everything extraction captured
+about it, keyed by ``(page_url, element_role)``. It yields the ordered list of primary
+locators used to find the element again (``locators``). When those fail, the healer
+scores candidates against it (``healix.healing.scorer``) and, on a confident match,
+replaces it with the healed element's fingerprint.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -56,6 +57,26 @@ class Fingerprint:
     iframe_path: list[str] = field(default_factory=list)
     platform_signal: Any = None
     dom_context: dict[str, Any] = field(default_factory=dict)
+    shadow_path: list[str] = field(default_factory=list)
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """``(page_url, element_role)`` — how the store identifies a fingerprint."""
+        return (self.page_url, self.element_role)
+
+    @property
+    def element_key(self) -> str:
+        """The key as one string, as used in ``element_healed`` events."""
+        return f"{self.page_url}#{self.element_role}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Fingerprint:
+        """Rebuild from ``to_dict`` output; unknown keys are ignored so old stores keep loading."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in raw.items() if k in known})
 
     @classmethod
     def from_element(
@@ -76,6 +97,7 @@ class Fingerprint:
             iframe_path=list(element.iframe_path),
             platform_signal=element.platform_signal,
             dom_context=dict(element.dom_context),
+            shadow_path=list(element.shadow_path),
         )
 
     def locators(self) -> Iterator[LocatorSpec]:
@@ -108,3 +130,9 @@ class Fingerprint:
 def _attr_selector(attribute: str, value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'[{attribute}="{escaped}"]'
+
+
+def describe_locator(fingerprint: Fingerprint) -> str:
+    """The highest-priority locator of ``fingerprint`` as ``"<strategy>=<value>"`` (or ``""``)."""
+    first = next(fingerprint.locators(), None)
+    return f"{first.strategy}={first.value}" if first else ""

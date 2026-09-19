@@ -4,10 +4,52 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. The first six milestones of the build
-plan are implemented; healing, the Selenium adapter, and script generation are not.
+Pre-release: nothing is published to PyPI yet. The first seven milestones of the build
+plan are implemented; the Selenium adapter and script generation are not.
 
 ### Added
+
+- **Self-healing.**
+  - `Healer` (`healix.Healer`): `learn` records fingerprints, `resolve` / `click` / `write` find an
+    element again after the page changes, `history` and `report` expose the audit trail. A context
+    manager that owns its browser and store unless you pass them; emits `element_healed` through
+    `on_event` and webhooks.
+  - Resolution order: a fingerprint's locators in priority order (stable attributes → id → name →
+    aria-label → css → xpath → normalized id → text); then, if none survive, **weighted scoring**
+    of every same-tag element. The best candidate is accepted only at or above the confidence
+    threshold (default 0.5) and only if it is not a near-tie with the runner-up
+    (`ambiguity_margin`, default 0.05). A weak or ambiguous match raises `ElementNotHealedError`;
+    it is never silently used.
+  - A locator that matches uniquely but is not the first *trusted* one tried (a later strategy, a
+    positional css/xpath, or text) is verified against the fingerprint and rejected if it does not
+    resemble the stored element.
+  - `healix.healing.scorer`: stable signals outweigh volatile ones (test id 0.25 … sibling index
+    0.02). A signal missing on either side is neutral; a different value is a mismatch; confidence is
+    damped by how much evidence could be compared, so sparse fingerprints cannot heal confidently.
+  - `FingerprintStore` (abstract), `SQLiteFingerprintStore` (default) and
+    `PostgresFingerprintStore`, keyed by `(page_url, element_role)`. A heal updates the fingerprint
+    and appends to the history in one transaction. Both are thread-safe and refuse a schema from a
+    newer Healix.
+  - **PostgreSQL store** (`pip install 'healix[postgres]'`, `psycopg` 3): `healix_`-prefixed tables,
+    `JSONB` columns so the audit trail is queryable in SQL, insertion order preserved, and schema
+    creation under an advisory lock so concurrent starts are safe. The connection URL's password is
+    never logged and is masked in `repr` and in error messages, even if a driver echoes it.
+  - `open_store(target)`: a store, a `postgresql://` URL, or a SQLite path. It is what `Healer`,
+    `Crawler(fingerprint_store=...)`, and `healix crawl --fingerprint-db` use, so all of them accept
+    either backend. One contract test suite runs against both, against a real PostgreSQL server.
+  - The healing history: every heal records old/new fingerprints and locators, strategy,
+    confidence, changed fields, and a verdict — `churn` (handles moved) or `regression` (the
+    element's visible meaning changed). `churn_report` ranks elements by how often they heal.
+  - **Canvas boundary:** healing on a page that is essentially one canvas/plugin surface raises
+    `UnsupportedRenderingError` instead of guessing.
+  - Baselines are recorded during extraction: `Crawler` / `Extractor` take `fingerprint_store` and
+    `fingerprint_mode` (`keep`, the default, never overwrites a baseline; `refresh` does), and the
+    CLI has `--fingerprint-db PATH`. Roles are stable names such as `textbox:login-username` or
+    `button:sign-in`, with repeats numbered `#2`.
+  - `Driver.locate(spec, fingerprint)`: resolves one locator strategy, so the healer can see which
+    strategy matched; `find` is now built on it. Implemented for Playwright.
+  - `dom_context.tag_path` on every extracted element: ancestor tag names from the root, not
+    shortened by an id anchor (an id-anchored xpath carries no path).
 
 - **Automatic login.**
   - `healix.auth.LoginHandler`: when discovery or extraction lands on a page classified `login`, it
@@ -161,6 +203,9 @@ plan are implemented; healing, the Selenium adapter, and script generation are n
   the MIT `LICENSE`.
 
 ### Changed
+
+- `Fingerprint` gains `shadow_path`, `to_dict` / `from_dict` (unknown keys ignored), `key` and
+  `element_key`. `healix.healing` exports its names lazily, to avoid an import cycle with the driver.
 
 - `Manifest` gains `blocked_on_auth` (default `false`; older manifests load unchanged), and
   `Run.summary()` gains the same key.

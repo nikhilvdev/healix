@@ -164,3 +164,71 @@ def webhook_receiver():
     receiver = WebhookReceiver()
     yield receiver
     receiver.close()
+
+
+@pytest.fixture(scope="session")
+def postgres_url():
+    """A PostgreSQL URL for tests.
+
+    ``HEALIX_TEST_POSTGRES_URL`` if set (CI provides one); otherwise a throwaway ``postgres:16``
+    container started with Docker. The test is skipped if neither is available.
+    """
+    pytest.importorskip("psycopg")
+    import os
+    import subprocess
+    import time
+    import uuid
+
+    import psycopg
+
+    url = os.environ.get("HEALIX_TEST_POSTGRES_URL")
+    container = None
+    if not url:
+        if shutil.which("docker") is None:
+            pytest.skip("set HEALIX_TEST_POSTGRES_URL or install Docker to run the Postgres tests")
+        container = f"healix-test-pg-{uuid.uuid4().hex[:8]}"
+        started = subprocess.run(
+            [
+                "docker", "run", "-d", "--rm", "--name", container,
+                "-e", "POSTGRES_USER=healix",
+                "-e", "POSTGRES_PASSWORD=healix",
+                "-e", "POSTGRES_DB=healix",
+                "-p", "127.0.0.1:0:5432",
+                "postgres:16-alpine",
+            ],
+            capture_output=True,
+            text=True,
+        )  # fmt: skip
+        if started.returncode != 0:
+            pytest.skip(f"could not start a Postgres container: {started.stderr.strip()[:200]}")
+        port = (
+            subprocess.run(
+                ["docker", "port", container, "5432/tcp"], capture_output=True, text=True
+            )
+            .stdout.splitlines()[0]
+            .rsplit(":", 1)[1]
+        )
+        url = f"postgresql://healix:healix@127.0.0.1:{port}/healix"
+    try:
+        for _ in range(60):
+            try:
+                psycopg.connect(url, connect_timeout=2).close()
+                break
+            except psycopg.OperationalError:
+                time.sleep(1)
+        else:
+            pytest.skip("Postgres did not become ready")
+        yield url
+    finally:
+        if container:
+            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+def drop_healix_tables(url: str) -> None:
+    """Remove Healix's tables so the next store starts from an empty database."""
+    import psycopg
+
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(
+            "DROP TABLE IF EXISTS healix_healing_history, healix_fingerprints, healix_meta CASCADE"
+        )
