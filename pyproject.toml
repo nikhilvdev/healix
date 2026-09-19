@@ -37,7 +37,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
-dependencies = ["logquill>=1.0"]
+dependencies = ["logquill>=1.0", "python-dotenv>=1.0"]
 
 [project.optional-dependencies]
 # Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
@@ -61,6 +61,9 @@ docs = [
     "pdoc>=16",
     "playwright>=1.40",
 ]
+
+[project.scripts]
+healix = "healix.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/nikhilvdev/healix"

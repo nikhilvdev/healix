@@ -1,0 +1,326 @@
+"""The public SDK: ``Crawler`` and ``Extractor``.
+
+::
+
+    from healix import Crawler
+
+    run = Crawler("run_config.json", on_event=print).discover_and_extract()
+    print(run.pages_extracted, "pages ->", run.manifest_path)
+
+Both classes take a run config (a path, a dict, or a ``RunConfig``), an optional
+``on_event`` callback and/or ``webhook_url``, and manage their own browser unless you
+pass a ``driver`` (in which case its lifecycle is yours). ``on_event`` and the webhook
+receive the *same* payload dicts — see ``healix.events``.
+
+The SDK does not read ``.env`` for you: call ``dotenv.load_dotenv()`` first if you keep
+``HEALIX_WEBHOOK_SECRET`` there. (The CLI does.)
+
+Events describe the work done by *this* call: resuming a run whose discovery already
+finished does not re-emit ``page_discovered`` for those pages.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from healix.config import RunConfig
+from healix.discovery.crawler import DiscoveryCrawler
+from healix.discovery.manifest import (
+    COMPLETE,
+    FAILED,
+    MAX_PAGES_REACHED,
+    Manifest,
+    ManifestPage,
+)
+from healix.driver.base import Driver
+from healix.driver.factory import create_driver
+from healix.events import (
+    PAGE_DISCOVERED,
+    PAGE_EXTRACTED,
+    RUN_COMPLETE,
+    EventCallback,
+    EventEmitter,
+    WebhookSender,
+    validate_webhook_url,
+)
+from healix.extraction import ElementExtractor, ExtractedPage
+from healix.extraction.element_extractor import MANIFEST_FILENAME
+from healix.log import get_logger
+
+logger = get_logger(__name__)
+
+WEBHOOK_SECRET_ENV = "HEALIX_WEBHOOK_SECRET"
+
+ConfigLike = RunConfig | dict[str, Any] | str | os.PathLike[str]
+
+
+class RunConflictError(ValueError):
+    """The output directory already holds a different run than the one requested."""
+
+
+@dataclass
+class Run:
+    """The outcome of a ``Crawler`` or ``Extractor`` call."""
+
+    run_id: str
+    manifest: Manifest
+    manifest_path: Path
+    output_path: Path
+
+    @property
+    def pages(self) -> list[ManifestPage]:
+        return self.manifest.pages
+
+    @property
+    def pages_discovered(self) -> int:
+        return self.manifest.pages_discovered
+
+    @property
+    def pages_extracted(self) -> int:
+        return self.manifest.pages_extracted
+
+    @property
+    def pages_failed(self) -> int:
+        return sum(1 for p in self.manifest.pages if p.status == FAILED)
+
+    @property
+    def platform_detected(self) -> str | None:
+        return self.manifest.platform_detected
+
+    @property
+    def discovery_status(self) -> str:
+        return self.manifest.discovery_status
+
+    def summary(self) -> dict[str, Any]:
+        """A plain-dict overview of the run (the ``run_complete`` fields, plus a little more)."""
+        return {
+            "run_id": self.run_id,
+            "discovery_status": self.discovery_status,
+            "pages_discovered": self.pages_discovered,
+            "pages_extracted": self.pages_extracted,
+            "pages_failed": self.pages_failed,
+            "platform_detected": self.platform_detected,
+            "manifest_path": str(self.manifest_path),
+        }
+
+
+def _load_manifest(path: Path) -> Manifest:
+    try:
+        return Manifest.load(path)
+    except FileNotFoundError:
+        raise
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"could not read the manifest at {path}: {exc!r}") from exc
+
+
+class _Runner:
+    """What ``Crawler`` and ``Extractor`` share: config, event sinks, and the browser."""
+
+    def __init__(
+        self,
+        config: ConfigLike | None,
+        *,
+        require_start: bool,
+        on_event: EventCallback | None,
+        webhook_url: str | None,
+        webhook_secret: str | None,
+        driver: Driver | None,
+        headless: bool,
+    ) -> None:
+        self.config = RunConfig.coerce(config, require_start=require_start)
+        self.on_event = on_event
+        self.webhook_url = validate_webhook_url(webhook_url) if webhook_url else None
+        self.webhook_secret = webhook_secret or os.environ.get(WEBHOOK_SECRET_ENV) or None
+        self._driver = driver
+        self.headless = headless
+
+    @contextlib.contextmanager
+    def _session(self, run_id: str) -> Iterator[tuple[Driver, EventEmitter]]:
+        """A started driver and an emitter for ``run_id``; everything is released on exit."""
+        with contextlib.ExitStack() as stack:
+            sender = None
+            if self.webhook_url:
+                sender = WebhookSender(self.webhook_url, secret=self.webhook_secret)
+                stack.callback(sender.close)  # runs after the driver is closed
+            driver = self._driver
+            if driver is None:
+                driver = create_driver(self.config.backend, headless=self.headless)
+                driver.start()
+                stack.callback(driver.close)
+            yield driver, EventEmitter(run_id, on_event=self.on_event, sender=sender)
+
+    @staticmethod
+    def _emit_discovered(emitter: EventEmitter, page: ManifestPage) -> None:
+        emitter.emit(
+            PAGE_DISCOVERED,
+            url=page.url,
+            page_type=page.page_type,
+            structural_hash=page.structural_hash,
+        )
+
+    @staticmethod
+    def _emit_extracted(emitter: EventEmitter, page: ExtractedPage) -> None:
+        emitter.emit(
+            PAGE_EXTRACTED,
+            url=page.url,
+            page_type=page.page_type,
+            element_count=page.element_count,
+            output_file=page.output_file,
+        )
+
+    @staticmethod
+    def _emit_complete(emitter: EventEmitter, manifest: Manifest, manifest_path: Path) -> None:
+        emitter.emit(
+            RUN_COMPLETE,
+            pages_discovered=manifest.pages_discovered,
+            pages_extracted=manifest.pages_extracted,
+            platform_detected=manifest.platform_detected,
+            manifest_path=str(manifest_path),
+        )
+
+
+class Crawler(_Runner):
+    """Discover every reachable page and (optionally) extract each one.
+
+    ``run_id`` names the run. Re-running with the same ``run_id`` over the same output
+    directory *resumes* it: finished discovery is reused, and extraction continues from
+    the first page that is not extracted. Without a ``run_id`` a new one is generated — and
+    if the output directory already holds a run, that is an error (``RunConflictError``)
+    rather than a silent overwrite. After a call, ``run_id`` holds the id that was used.
+    """
+
+    def __init__(
+        self,
+        config: ConfigLike,
+        *,
+        run_id: str | None = None,
+        on_event: EventCallback | None = None,
+        webhook_url: str | None = None,
+        webhook_secret: str | None = None,
+        driver: Driver | None = None,
+        headless: bool = True,
+    ) -> None:
+        super().__init__(
+            config,
+            require_start=True,
+            on_event=on_event,
+            webhook_url=webhook_url,
+            webhook_secret=webhook_secret,
+            driver=driver,
+            headless=headless,
+        )
+        self.run_id = run_id
+
+    def discover(self) -> Run:
+        """Discovery only: find the pages and write the manifest; extract nothing."""
+        return self._run(extract=False)
+
+    def discover_and_extract(self) -> Run:
+        """Discover every page, then extract each one to JSON."""
+        return self._run(extract=True)
+
+    def _run(self, *, extract: bool) -> Run:
+        config = self.config
+        out = Path(config.extraction.output_path)
+        manifest_path = out / MANIFEST_FILENAME
+        run_id, existing = self._resolve_run(manifest_path)
+        self.run_id = run_id
+
+        with self._session(run_id) as (driver, emitter):
+            if existing is not None and existing.discovery_status in (COMPLETE, MAX_PAGES_REACHED):
+                logger.info(
+                    "resuming run; discovery already finished",
+                    run_id=run_id,
+                    pages_discovered=existing.pages_discovered,
+                    pages_extracted=existing.pages_extracted,
+                )
+                manifest = existing
+            else:
+                manifest = DiscoveryCrawler(
+                    driver,
+                    config.discovery,
+                    on_page_discovered=lambda page: self._emit_discovered(emitter, page),
+                ).discover(config.start_urls, run_id=run_id, manifest_path=manifest_path)
+
+            if extract:
+                manifest = ElementExtractor(
+                    driver,
+                    config.extraction,
+                    on_page_extracted=lambda page: self._emit_extracted(emitter, page),
+                ).extract(manifest, manifest_path=manifest_path)
+
+            self._emit_complete(emitter, manifest, manifest_path)
+        return Run(run_id, manifest, manifest_path, out)
+
+    def _resolve_run(self, manifest_path: Path) -> tuple[str, Manifest | None]:
+        if not manifest_path.exists():
+            return self.run_id or uuid.uuid4().hex[:12], None
+        existing = _load_manifest(manifest_path)
+        if self.run_id is None:
+            raise RunConflictError(
+                f"{manifest_path} already holds run {existing.run_id!r}. Pass run_id="
+                f"{existing.run_id!r} to resume it, or use a different output path for a new run."
+            )
+        if self.run_id != existing.run_id:
+            raise RunConflictError(
+                f"{manifest_path} holds run {existing.run_id!r}, not {self.run_id!r}. "
+                "Use a different output path for a new run."
+            )
+        return existing.run_id, existing
+
+
+class Extractor(_Runner):
+    """Extract the pages of an existing manifest to JSON (resumably).
+
+    ``extract`` takes a ``Manifest`` or a path to one. Given a path and no explicit
+    ``config``, output goes next to the manifest; with a ``config``, to its
+    ``crawl.extraction.output_path``. Progress is saved back to the manifest after every
+    page, and only pages that are not yet extracted are processed.
+    """
+
+    def __init__(
+        self,
+        config: ConfigLike | None = None,
+        *,
+        on_event: EventCallback | None = None,
+        webhook_url: str | None = None,
+        webhook_secret: str | None = None,
+        driver: Driver | None = None,
+        headless: bool = True,
+    ) -> None:
+        super().__init__(
+            config,
+            require_start=False,
+            on_event=on_event,
+            webhook_url=webhook_url,
+            webhook_secret=webhook_secret,
+            driver=driver,
+            headless=headless,
+        )
+        self._explicit_config = config is not None
+
+    def extract(self, manifest: Manifest | str | os.PathLike[str]) -> Run:
+        extraction = self.config.extraction
+        if isinstance(manifest, Manifest):
+            loaded = manifest
+            manifest_path = Path(extraction.output_path) / MANIFEST_FILENAME
+        else:
+            manifest_path = Path(manifest)
+            loaded = _load_manifest(manifest_path)
+            if not self._explicit_config:
+                extraction = replace(extraction, output_path=str(manifest_path.parent))
+
+        with self._session(loaded.run_id) as (driver, emitter):
+            result = ElementExtractor(
+                driver,
+                extraction,
+                on_page_extracted=lambda page: self._emit_extracted(emitter, page),
+            ).extract(loaded, manifest_path=manifest_path)
+            self._emit_complete(emitter, result, manifest_path)
+        return Run(result.run_id, result, manifest_path, Path(extraction.output_path))

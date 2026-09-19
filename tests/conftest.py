@@ -116,3 +116,51 @@ def captured_logs():
     configure_logging(level="trace", transports=[transport])
     yield transport.records
     configure_logging(level=saved_level, transports=saved_transports)
+
+
+class WebhookReceiver:
+    """A local HTTP endpoint that records every POST and answers with scripted statuses."""
+
+    def __init__(self):
+        self.requests: list[dict] = []
+        self._statuses: list[int] = []
+        receiver = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                receiver.requests.append(
+                    {"path": self.path, "headers": dict(self.headers.items()), "body": body}
+                )
+                status = receiver._statuses.pop(0) if receiver._statuses else 200
+                self.send_response(status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/hook"
+
+    def respond_with(self, *statuses: int) -> None:
+        """Statuses for the next requests, in order; after they run out the answer is 200."""
+        self._statuses = list(statuses)
+
+    @property
+    def payloads(self) -> list[dict]:
+        import json
+
+        return [json.loads(r["body"]) for r in self.requests]
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def webhook_receiver():
+    receiver = WebhookReceiver()
+    yield receiver
+    receiver.close()

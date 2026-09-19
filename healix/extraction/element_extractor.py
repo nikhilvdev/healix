@@ -36,7 +36,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -46,6 +46,7 @@ from healix.discovery.manifest import EXTRACTED, Manifest, ManifestPage, structu
 from healix.driver.base import Driver, Element
 from healix.fs import write_json_atomic
 from healix.log import get_logger
+from healix.timeutil import iso_utc, utc_now
 
 logger = get_logger(__name__)
 
@@ -160,14 +161,6 @@ def output_filename(index: int, url: str) -> str:
     return f"{PAGES_DIR}/{index:04d}-{slug}.json"
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
 # --------------------------------------------------------------------------- #
 # Extractor
 # --------------------------------------------------------------------------- #
@@ -190,7 +183,7 @@ class ElementExtractor:
         *,
         classifier: Classifier | None = classify,
         on_page_extracted: Callable[[ExtractedPage], None] | None = None,
-        clock: Callable[[], datetime] = _utc_now,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.driver = driver
         self.config = config or ExtractionConfig()
@@ -282,7 +275,7 @@ class ElementExtractor:
             final_url=final_url,
             page_type=page_type,
             elements=elements,
-            captured_at=_iso(self.clock()),
+            captured_at=iso_utc(self.clock()),
         )
         if page.structural_hash and document["structural_hash"] != page.structural_hash:
             logger.info(

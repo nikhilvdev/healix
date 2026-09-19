@@ -57,6 +57,8 @@ raised as an issue and discussed *before* code is written.
 - **Pure Python.** No second implementation language and no compiled core.
 - **No LLM calls** in the crawl/discover/classify/extract path. Classification is
   rule-based so runs are deterministic and cost nothing.
+- **The run config never holds secrets, and the parser enforces it.** `RunConfig` rejects
+  credential-looking keys; don't loosen that check to make a new option convenient.
 - **No credentials in committed files.** Secrets live in `.env` (git-ignored), never in
   `run_config.json`, fixtures, logs, manifests, or events. Ship placeholders only in
   `.env.example`.
@@ -80,7 +82,9 @@ Some things are documented in more than one place. Change them together:
   look-alike it could be confused with.
 - **A new locator strategy** → its priority position in `healing/scorer.py` and in the
   README's description of the resolver.
-- **A new event type** → `events/schema.py` and the event table, in the same change.
+- **A new event type** → `events/schema.py` and the README's event table, in the same change (a
+  test fails if the two disagree). Emit it through `EventEmitter` so the SDK callback and the
+  webhook see the same payload.
 - **A new run-config key** → the config table in the README.
 
 ## Reporting issues

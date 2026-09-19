@@ -4,11 +4,41 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. The first four milestones of the build
-plan are implemented; login, healing, the Selenium adapter, script generation, and the
-SDK/CLI/event surface are not.
+Pre-release: nothing is published to PyPI yet. The first five milestones of the build
+plan are implemented; login, healing, the Selenium adapter, and script generation are not.
 
 ### Added
+
+- **SDK, CLI, and webhooks on one event schema.**
+  - `Crawler` (`discover()`, `discover_and_extract()`) and `Extractor` (`extract()`), exported from
+    `healix`, each returning a `Run` (`run_id`, `pages`, counts, `manifest_path`, `summary()`).
+    They accept a run config as a path, a dict, or a `RunConfig`, plus `on_event`, `webhook_url`,
+    `webhook_secret`, a caller-supplied `driver`, and `headless`.
+  - `run_id` semantics: re-running with the same id over the same output directory resumes it
+    (finished discovery is reused; extraction continues from the first page not `extracted`). A
+    run without an id over a directory that already holds a run raises `RunConflictError` instead
+    of overwriting it.
+  - The `healix` command: `healix crawl` (with `--output`, `--run-id`, `--discover-only`,
+    `--webhook-url`, `--headed`, `--json`, `--log-level`) and `healix extract`, also available as
+    `python -m healix`. Exit codes: 0 ok, 1 runtime error, 2 usage/config error, 3 some pages
+    failed, 130 interrupted. The CLI goes through the SDK, so it emits exactly the SDK's events.
+  - `healix.events`: the shared schema for all six event types (`page_discovered`,
+    `page_extracted`, `element_healed`, `script_generated`, `run_complete`, `login_failed`) with
+    validated `data` shapes, an emitter, and `WebhookSender`. `on_event` and `--webhook-url`
+    receive identical payload dicts. Emitted today: `page_discovered`, `page_extracted`,
+    `run_complete`; the others are defined for the features that will emit them. A test keeps the
+    README event table in sync with the schema.
+  - Webhook delivery runs on a background thread so a slow endpoint never stalls a crawl, retries
+    network errors/5xx/408/429 with exponential backoff, signs the body with HMAC-SHA256
+    (`X-Healix-Signature`) when `HEALIX_WEBHOOK_SECRET` is set, and never logs the URL (only its
+    host). A failing `on_event` callback or webhook is logged and never fails the run.
+  - `RunConfig`: the run-config JSON, validated. Unknown keys are errors, `mode` is inferred, and
+    **credential-looking keys (`password`, `secret`, `token`, `api_key`, `credential…`,
+    `username`) are rejected at any depth** with a pointer to `.env`, enforcing that the config
+    is always safe to commit.
+  - `healix.driver.factory.create_driver` and `BackendUnavailableError` (Playwright missing, or the
+    not-yet-implemented `selenium` backend).
+  - `.env.example` gains `HEALIX_WEBHOOK_SECRET`.
 
 - **Sequential, resumable extraction.**
   - `ElementExtractor` in `healix.extraction` walks the manifest one page at a time — navigate,
@@ -105,8 +135,9 @@ SDK/CLI/event surface are not.
 - A lone "Next" *link* now counts as list pagination (page 1 of a list has no "Previous"); a lone
   "Next" *button* still does not.
 
-- **New runtime dependency: `logquill>=1.0`** (itself dependency-free). Healix previously had
-  none.
+- **New runtime dependencies:** `logquill>=1.0` (itself dependency-free) and
+  `python-dotenv>=1.0` (the CLI loads a `.env` from the current directory). Healix previously
+  had none. The package now declares a `healix` console script.
 - `DiscoveryCrawler` classifies every page by default with `healix.classification.classify`.
   The `classifier` hook now takes `(elements, url)` instead of `(elements)`; pass
   `classifier=None` to skip classification.

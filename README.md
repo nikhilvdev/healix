@@ -11,9 +11,9 @@ external orchestration platforms through an SDK, a CLI, and webhooks.
 
 **Status: pre-release, under active development.** The driver abstraction (Playwright),
 iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
-rule-based page classification, and extraction to per-page JSON are
-implemented and tested. Login handling, the healing scorer and store, the Selenium adapter, script generation,
-and the SDK/CLI/event surface are **not built yet** — see the [Roadmap](#roadmap) and
+rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
+surface are implemented and tested. Login handling, the healing scorer and store, the Selenium
+adapter, and script generation are **not built yet** — see the [Roadmap](#roadmap) and
 `CHANGELOG.md`. Nothing is published to PyPI yet.
 
 ## Features
@@ -54,9 +54,16 @@ Available now:
   writes one full-detail JSON file per page, saving progress after every page so an
   interrupted run resumes where it stopped — see [Extraction and output](#extraction-and-output)
 
-Planned (see [Roadmap](#roadmap)): auto-detected login with `.env` credentials, weighted and threshold-gated
-self-healing with a persistent fingerprint store, a Selenium adapter, script generation,
-and the SDK / CLI / webhook surface.
+- **SDK, CLI, and webhooks on one event schema** — `Crawler` and `Extractor` in Python,
+  `healix crawl` / `healix extract` on the command line. `on_event` and `--webhook-url` emit the
+  *same* payloads (`page_discovered`, `page_extracted`, `run_complete`, …), signed if you set a
+  secret — see [SDK](#sdk), [CLI](#cli), and [Events](#events)
+- **A run config that is safe to commit** — credential-looking keys are rejected, pointing you at
+  `.env` — see [Run configuration](#run-configuration)
+
+Planned (see [Roadmap](#roadmap)): auto-detected login with `.env` credentials, weighted and
+threshold-gated self-healing with a persistent fingerprint store, a Selenium adapter, and
+script generation.
 
 ## Install
 
@@ -71,9 +78,52 @@ pip install -e ".[playwright]"
 playwright install chromium
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. This also installs the `healix` command. Runtime dependencies are
+`logquill` (logging) and `python-dotenv` (the CLI loads `.env`); Playwright is an optional extra.
 
 ## Quickstart
+
+### Crawl a site with the SDK
+
+Write a run config (safe to commit — see [Run configuration](#run-configuration)):
+
+```json
+{
+  "base_url": "https://quotes.toscrape.com/",
+  "crawl": {
+    "discovery": { "max_pages": 4 },
+    "extraction": { "output_path": "./output/" }
+  }
+}
+```
+
+```python
+from healix import Crawler
+
+run = Crawler("run_config.json", on_event=print).discover_and_extract()
+print(run.pages_extracted, "of", run.pages_discovered, "pages ->", run.manifest_path)
+```
+
+`on_event` is called with one dict per event as the crawl progresses (see [Events](#events)).
+`run.pages` are the manifest entries; the JSON for each is under `output/pages/`.
+
+### Crawl a site with the CLI
+
+```bash
+healix crawl --config run_config.json --webhook-url https://hooks.example.com/healix
+```
+
+```text
+run bebd30b63d35: 4 of 4 pages extracted (discovery max_pages_reached)
+manifest: output/manifest.json
+```
+
+The webhook received the same events `on_event` would have — here, four `page_discovered`, four
+`page_extracted`, and one `run_complete`:
+
+```json
+{"event": "run_complete", "run_id": "bebd30b63d35", "timestamp": "2026-09-19T18:00:14.862Z", "data": {"pages_discovered": 4, "pages_extracted": 4, "platform_detected": null, "manifest_path": "output/manifest.json"}}
+```
 
 ### Extract every element on a page
 
@@ -164,7 +214,9 @@ with PlaywrightDriverAdapter() as driver:
 
     result = classify_page(elements, driver.current_url)
     print(result.page_type, result.confidence)  # login 1.0
-    print(result.signals["login"])  # ['password_input', 'submit_control', 'few_fields', 'login_cue']
+    print(
+        result.signals["login"]
+    )  # ['password_input', 'submit_control', 'few_fields', 'login_cue']
 ```
 
 `DiscoveryCrawler` runs this on every page it visits, so each manifest entry already has
@@ -203,7 +255,9 @@ extracted detail pages/0004-quotes.toscrape.com-tag-change-page-1.json
 
 ### Resume an interrupted run
 
-Progress is saved after every page, so just run the extractor again over the same manifest:
+Progress is saved after every page. With the SDK or CLI, re-run with the same `run_id`
+(`Crawler(config, run_id="…")`, `healix crawl --run-id …`); see [Resuming](#resuming-a-run).
+Working at the lower level, just run the extractor again over the same manifest:
 
 ```python
 with PlaywrightDriverAdapter() as driver:
@@ -213,6 +267,171 @@ with PlaywrightDriverAdapter() as driver:
 Pages already `extracted` are skipped, `failed` pages are retried, and a page marked
 `extracted` whose output file has gone missing is extracted again. Low-level access is on
 `Manifest`: `remaining_pages()`, `mark_extracted()`, `mark_failed()`, `save()`.
+
+## Run configuration
+
+One JSON file describes a crawl. It is safe to commit: it never holds secrets.
+
+```json
+{
+  "mode": "guided | autonomous",
+  "base_url": "https://example.com",
+  "start_url": "https://example.com/login",
+  "crawl": {
+    "discovery": {
+      "domain_scope": "same_domain",
+      "max_pages": 50,
+      "dedupe_by": "url_normalized_and_structural_hash",
+      "template_sample_size": 3
+    },
+    "extraction": {
+      "sequence": "one_by_one",
+      "output_format": "json",
+      "output_path": "./output/",
+      "iframe_traversal": true,
+      "platform_detection": "auto"
+    }
+  },
+  "backend": "playwright | selenium"
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `mode` | `guided`: crawl starts at `start_url` (and `base_url`, if given). `autonomous`: only `base_url`; the crawl discovers from scratch. Optional — inferred as `guided` when `start_url` is present |
+| `base_url`, `start_url` | Absolute http(s) URLs. Guided mode needs `start_url`; autonomous needs `base_url` |
+| `crawl.discovery` | See [Discovery config](#config) |
+| `crawl.extraction` | See [Extraction config](#config-1) |
+| `backend` | `playwright` (default). `selenium` is accepted but not implemented yet — using it raises a clear error |
+
+Everything is optional except the start point. Unknown keys are errors, not silently ignored, so a
+typo can't quietly change a crawl.
+
+**Secrets never go here.** Any key that looks like a credential (`password`, `secret`, `token`,
+`api_key`, `credential…`, `username`) is rejected at any depth, with a message pointing at `.env`.
+Put credentials and the webhook secret in the environment or a git-ignored `.env`
+(see [`.env.example`](.env.example)).
+
+## SDK
+
+```python
+from healix import Crawler, Extractor
+```
+
+| | |
+|---|---|
+| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True)` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
+| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True)` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+
+`config` is a path to a run-config JSON, a dict, or a `RunConfig`. Both calls return a `Run`:
+`run.run_id`, `run.pages` (manifest entries), `run.pages_discovered`, `run.pages_extracted`,
+`run.pages_failed`, `run.platform_detected`, `run.discovery_status`, `run.manifest_path`,
+`run.summary()`.
+
+- **The browser.** Unless you pass a `driver`, the SDK launches and closes its own (Playwright,
+  headless by default). A `driver` you pass is used as-is and its lifecycle stays yours.
+- **`.env`.** The SDK does not read `.env`. If you keep `HEALIX_WEBHOOK_SECRET` there, call
+  `dotenv.load_dotenv()` first, or pass `webhook_secret=`.
+- **`Extractor` output location.** Given a manifest *path* and no `config`, output goes beside the
+  manifest. With a `config`, it goes to `crawl.extraction.output_path`.
+- **Errors.** `ConfigError` (bad config), `RunConflictError` (see below),
+  `BackendUnavailableError` (Playwright missing, or `selenium`). All are ordinary exceptions; the
+  SDK never calls `sys.exit`.
+
+### Resuming a run
+
+`run_id` names a run. Re-running with the **same `run_id`** over the same output directory
+resumes it: finished discovery is reused, and extraction continues from the first page that is not
+`extracted` (failed pages are retried). The events you receive describe the work done by *that
+call* — a resume does not re-announce pages discovered earlier.
+
+Without a `run_id`, a new one is generated and kept on `crawler.run_id`. If the output directory
+already holds a run, that is a `RunConflictError` rather than a silent overwrite — pass the run's id
+to resume it, or choose another output path.
+
+## CLI
+
+```bash
+healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only]
+               [--webhook-url URL] [--headed] [--json] [--log-level LEVEL]
+healix extract --manifest output/manifest.json [--config run_config.json]
+               [--webhook-url URL] [--headed] [--json] [--log-level LEVEL]
+healix --version          # also: python -m healix
+```
+
+- `crawl` runs discovery then extraction (`--discover-only` stops after discovery). `--output`
+  overrides `crawl.extraction.output_path`.
+- `extract` runs extraction over an existing manifest — a second step after `--discover-only`, or
+  the way to retry failed pages. Output goes beside the manifest unless `--config` says otherwise.
+- `--webhook-url` posts every event to that URL; see [Webhooks](#webhooks). The CLI goes through
+  the SDK, so the events are exactly what `on_event` receives.
+- `--json` prints the run summary as one JSON line on stdout instead of the human text. Logs go to
+  stderr (JSON lines, `WARN` and above by default; `--log-level` changes it).
+- The CLI loads a `.env` from the current directory.
+
+| Exit status | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Runtime error (browser failure, backend unavailable, …) |
+| `2` | Usage or configuration error, including a run conflict |
+| `3` | The run finished, but some pages failed (`--run-id` the same id to retry them) |
+| `130` | Interrupted. Progress is saved; the message says how to resume |
+
+## Events
+
+Every event has the same envelope, whether it arrives through `on_event` or a webhook:
+
+```json
+{"event": "page_extracted", "run_id": "bebd30b63d35", "timestamp": "2026-09-19T18:00:09.658Z", "data": {"url": "…", "page_type": "list", "element_count": 136, "output_file": "pages/0001-quotes.toscrape.com.json"}}
+```
+
+`data` has exactly these fields for each event type — no more, no fewer. `make_event` validates it,
+so the contract can't drift.
+
+| Event | `data` contains |
+|---|---|
+| `page_discovered` | `url`, `page_type`, `structural_hash` |
+| `page_extracted` | `url`, `page_type`, `element_count`, `output_file` |
+| `element_healed` | `element_key`, `old_locator`, `new_locator`, `strategy_used`, `confidence_score`, `page_url` |
+| `script_generated` | `backend`, `style`, `file_path`, `element_count` |
+| `run_complete` | `pages_discovered`, `pages_extracted`, `platform_detected`, `manifest_path` |
+| `login_failed` | `url`, `reason`, `screenshot_ref` |
+
+`page_type` in `page_discovered` is provisional (classified during discovery); in `page_extracted`
+it is final. A `login_failed` `reason` is one of `mfa_required`, `timeout`, `selector_not_found`,
+`auth_rejected`.
+
+**Emitted today:** `page_discovered` (once per new manifest entry), `page_extracted` (once per page
+written), and `run_complete` (last). **Defined but not emitted yet:** `element_healed`,
+`script_generated`, and `login_failed` — they arrive with self-healing, script generation, and login
+handling. The schema, in `healix.events`, already includes them.
+
+### Webhooks
+
+`--webhook-url` (or `webhook_url=`) POSTs each event's JSON, in order, from a background thread — a
+slow endpoint never stalls the crawl.
+
+- Headers: `Content-Type: application/json`, `X-Healix-Event: <event type>`, `User-Agent: healix/<version>`.
+- **Signing.** If `HEALIX_WEBHOOK_SECRET` is set (or `webhook_secret=` passed), each request also
+  carries `X-Healix-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw request body. Verify it
+  before trusting a payload:
+
+  ```python
+  import hashlib, hmac
+
+
+  def verify(secret: str, body: bytes, header: str) -> bool:
+      expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+      return hmac.compare_digest(expected, header)
+  ```
+
+- **Retries.** Network errors, timeouts, HTTP 5xx, 408 and 429 are retried up to 3 times with
+  exponential backoff; other 4xx responses are not (the receiver said no). A delivery that finally
+  fails is logged and skipped — it never fails the crawl.
+- **Not logged.** The URL (webhook URLs often embed tokens) is never logged, only its host.
+- Delivery is best-effort: events are queued in memory (up to 1000) and flushed when the run ends.
+  It is not a durable queue — if you can't afford to miss an event, treat the manifest as the source
+  of truth.
 
 ## How it works
 
@@ -507,11 +726,11 @@ surprising label is debuggable, and `confidence` lets callers ignore low-confide
 
 ```python
 result = classify_page(elements, url)  # a product grid with a header search box
-result.page_type   # "list"
+result.page_type  # "list"
 result.confidence  # 0.9
-result.scores      # {"login": 0.15, "dashboard": 0.15, "list": 0.9, "detail": 0.1, "form": 0.45,
-                   #  "search": 0.0, "checkout": 0.0, "nav_shell": 0.7, "modal": 0.0}
-result.signals["list"]       # ["repeating_rows", "pagination", "few_fields"]
+result.scores  # {"login": 0.15, "dashboard": 0.15, "list": 0.9, "detail": 0.1, "form": 0.45,
+#  "search": 0.0, "checkout": 0.0, "nav_shell": 0.7, "modal": 0.0}
+result.signals["list"]  # ["repeating_rows", "pagination", "few_fields"]
 result.signals["nav_shell"]  # [..., "-repeating_content_rows"]  (a "-" prefix is a penalty)
 ```
 
@@ -552,9 +771,9 @@ HEALIX_LOG_LEVEL=debug python my_crawl.py
 from logquill import FileTransport
 from healix.log import configure_logging
 
-configure_logging(level="info")                                 # just change the level
-configure_logging(transports=[FileTransport("healix.log")])     # send records elsewhere
-configure_logging(transports=[])                                # silence Healix entirely
+configure_logging(level="info")  # just change the level
+configure_logging(transports=[FileTransport("healix.log")])  # send records elsewhere
+configure_logging(transports=[])  # silence Healix entirely
 ```
 
 Levels: `info` records discovery start and finish, `debug` adds every discovered page, every
@@ -575,7 +794,8 @@ These are fixed unless explicitly reopened:
 - **Rule-based classification, no LLM calls** anywhere in the crawl/classify/extract path —
   deterministic, reproducible runs with no external API cost.
 - **Secrets live in `.env` only.** Never in the run config, which must always be safe to
-  commit. Copy [`.env.example`](.env.example) to `.env` (git-ignored).
+  commit — the config parser enforces this by rejecting credential-looking keys. Copy
+  [`.env.example`](.env.example) to `.env` (git-ignored).
 - **Login is a page classification**, not a separate config step. A page classified `login`
   is handed to a login handler that applies `.env` credentials.
 - **Platform adapters are additive.** SAP UI5 and Salesforce LWC adapters, when they land,
@@ -601,6 +821,9 @@ These are fixed unless explicitly reopened:
   manifest entry.
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
+- **Webhook delivery is best-effort**, not durable — see [Webhooks](#webhooks).
+- **`Healer`, `ScriptGenerator`, and `healix generate` do not exist yet**, and neither does the
+  Selenium backend (`backend: "selenium"` is accepted but raises).
 - **Classification is heuristic** — see [Accuracy and limits](#accuracy-and-limits).
 - Authenticated crawling arrives with the login handler; today discovery sees only what an
   anonymous browser sees.
@@ -613,31 +836,29 @@ These are fixed unless explicitly reopened:
 | 2 | Discovery, manifest, dedup, per-page status | ✅ Done |
 | 3 | Rule-based page classification (`login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`), and logquill-based logging | ✅ Done |
 | 4 | Sequential extraction — one JSON file per page, resumable | ✅ Done |
-| 5 | SDK (`Crawler`, `Extractor`, `Healer`, `ScriptGenerator`), CLI, event schema and webhooks | Planned |
+| 5 | SDK (`Crawler`, `Extractor`), CLI (`crawl`, `extract`), event schema and webhooks | ✅ Done |
 | 6 | Auto-detected login with `.env` credentials, MFA abort, mid-crawl re-login | Planned |
 | 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, SQLite/Postgres store | Planned |
 | 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | Planned |
 | 9 | Packaging, `healix doctor`, PyPI release | Planned |
 
-### Planned integration surface
+### Still planned
 
-Not implemented yet — shown so the direction is clear. All three will emit the same event
-payloads (`page_discovered`, `page_extracted`, `element_healed`, `script_generated`,
-`run_complete`, `login_failed`).
+Not implemented yet — shown so the direction is clear. They will emit the same events
+(`element_healed`, `script_generated`, `login_failed`) through the same `on_event` and webhooks.
 
 ```python
-# SDK
-from healix import Crawler, ScriptGenerator
+from healix import ScriptGenerator
 
-run = Crawler(config="run_config.json").discover_and_extract()
 script = ScriptGenerator(run.pages).to_playwright(style="pom")
 ```
 
 ```bash
-# CLI
-healix crawl --config run_config.json --output ./output/
 healix generate --input ./output/manifest.json --backend playwright --style pom
+healix doctor
 ```
+
+`Healer` (weighted, threshold-gated self-healing) joins the SDK with the healing milestone.
 
 ## API reference
 
