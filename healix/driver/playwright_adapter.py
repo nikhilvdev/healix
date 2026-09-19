@@ -6,7 +6,6 @@ This is one of the only modules allowed to import ``playwright``.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
@@ -17,8 +16,9 @@ from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Tar
 from healix.driver.frames import COLLECT_ALL_JS, DESCRIBE_ONE_JS, collect_elements, walk_frames
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
+from healix.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PlaywrightDriverAdapter(Driver):
@@ -89,7 +89,9 @@ class PlaywrightDriverAdapter(Driver):
                 self.page.wait_for_load_state("networkidle", timeout=self._settle_timeout_ms)
             except PlaywrightError:
                 logger.debug(
-                    "network did not go idle within %sms on %s", self._settle_timeout_ms, url
+                    "network did not go idle after load",
+                    url=url,
+                    timeout_ms=self._settle_timeout_ms,
                 )
 
     def get_frames(self) -> list[Frame]:
@@ -166,7 +168,7 @@ class PlaywrightDriverAdapter(Driver):
         try:
             return locator if locator.count() == 1 else None
         except Exception as exc:  # e.g. selector syntax the browser rejects
-            logger.debug("locator %s failed: %s", spec, exc)
+            logger.debug("locator failed", strategy=spec.strategy, value=spec.value, error=str(exc))
             return None
 
     def _locator_for(self, target: Target) -> Locator:

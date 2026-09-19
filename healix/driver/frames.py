@@ -15,14 +15,14 @@ Closed shadow roots and cross-origin frames are not reachable and are skipped.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from healix.driver.base import MAIN_FRAME, Element, Frame
+from healix.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 H = TypeVar("H")
 
@@ -143,6 +143,8 @@ function computedState(el, root, rect) {
     readonly: isTextField ? el.readOnly : null,
     required: (isTextField || el.localName === 'select') ? el.required : null,
     focused: root.activeElement === el,
+    position: style.position,
+    z_index: Number.isFinite(parseInt(style.zIndex, 10)) ? parseInt(style.zIndex, 10) : null,
     // Absolute URL as the browser resolves it (honours <base href>); null for non-links.
     href: ((el.localName === 'a' || el.localName === 'area') && typeof el.href === 'string' && el.href) ? el.href : null,
   };
@@ -279,13 +281,16 @@ def collect_elements(
     elements: list[Element] = []
     for frame in frames:
         if not frame.same_origin:
-            logger.debug("skipping cross-origin frame %s (%s)", frame.path, frame.url)
+            logger.debug("skipping cross-origin frame", frame=frame.path, url=frame.url)
             continue
         try:
             raw_elements = run_collector(frame)
         except Exception as exc:
-            logger.warning(
-                "could not collect elements from frame %s (%s): %s", frame.path, frame.url, exc
+            logger.warn(
+                "could not collect elements from frame",
+                frame=frame.path,
+                url=frame.url,
+                error=str(exc),
             )
             continue
         elements.extend(Element.from_dict(raw, iframe_path=frame.path) for raw in raw_elements)

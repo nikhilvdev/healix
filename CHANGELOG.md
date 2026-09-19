@@ -4,11 +4,34 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. Phases 1 and 2 of the build plan are
-implemented; classification, extraction output, login, healing, the Selenium adapter,
-script generation, and the SDK/CLI/event surface are not.
+Pre-release: nothing is published to PyPI yet. Phases 1–3 of the build plan are
+implemented; extraction output, login, healing, the Selenium adapter, script generation,
+and the SDK/CLI/event surface are not.
 
 ### Added
+
+- **Rule-based page classification (Phase 3).**
+  - `classify(elements, url)` and `classify_page(elements, url)` in `healix.classification`
+    label a page `login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`,
+    `nav_shell`, `modal`, or `unknown`. Deterministic element-count and attribute heuristics
+    — no LLM calls, no network.
+  - Each type is a rule awarding weighted signals; a type is chosen at score ≥ 0.5, near-ties
+    (within 0.15) go to the more specific type by a fixed priority order, and below 0.5 the
+    answer is `unknown`. `classify_page` returns the scores and the signals that fired, plus
+    a `confidence`.
+  - Only visible elements vote. Guards against the common false positives: a registration
+    form is not a login, a header search box is not a search page, a link-heavy product grid
+    is not a `nav_shell`, a form-like settings menu on a content page is not a form, and a
+    thin cookie banner or toast is not a `modal`.
+  - Covered by unit tests, by realistic rendered pages for every type run through Chromium,
+    and by a test that keeps the README's page-type table in sync with the code.
+- **Structured logging on logquill.** `healix.log` provides `get_logger(__name__)` and
+  `configure_logging(level=, transports=)`. Records are a constant message plus metadata.
+  Default is `WARN` and above as JSON lines on stderr; `HEALIX_LOG_LEVEL` overrides the level;
+  `configure_logging` updates every logger already handed out (logquill's `child()` copies
+  its parent's transports, so loggers created at import time would otherwise go stale).
+  Discovery now logs start and finish at `info`, and each discovered page at `debug`.
+- `computed.position` and `computed.z_index` on every extracted element.
 
 - **Driver abstraction (Phase 1).**
   - `Driver` ABC (`navigate`, `find`, `click`, `write`, `get_elements`, `get_frames`,
@@ -54,6 +77,13 @@ script generation, and the SDK/CLI/event surface are not.
   the MIT `LICENSE`.
 
 ### Changed
+
+- **New runtime dependency: `logquill>=1.0`** (itself dependency-free). Healix previously had
+  none.
+- `DiscoveryCrawler` classifies every page by default with `healix.classification.classify`.
+  The `classifier` hook now takes `(elements, url)` instead of `(elements)`; pass
+  `classifier=None` to skip classification.
+- Stdlib `logging` is no longer used anywhere in Healix; all log calls go through logquill.
 
 - `PlaywrightDriverAdapter.navigate()` now also waits, best-effort and bounded by
   `settle_timeout_ms` (default 3000; `0` disables), for the network to go idle after `load`,

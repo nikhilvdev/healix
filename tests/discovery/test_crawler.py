@@ -266,7 +266,7 @@ def test_classifier_sets_provisional_page_type_and_callback_fires_for_new_pages_
     crawler = DiscoveryCrawler(
         driver,
         DiscoveryConfig(max_pages=100),
-        classifier=lambda elements: (
+        classifier=lambda elements, url: (
             "detail" if any(e.name == "product" for e in elements) else "nav_shell"
         ),
         on_page_discovered=seen.append,
@@ -294,7 +294,7 @@ def test_manifest_is_written_on_success_and_on_interruption(tmp_path):
     )
     assert Manifest.load(tmp_path / "ok.json").to_dict() == ok.to_dict()
 
-    def explode(elements):
+    def explode(elements, url):
         if any(e.name == "a" for e in elements):
             raise RuntimeError("classifier bug")
         return "x"
@@ -336,3 +336,60 @@ def test_config_from_run_config_block():
 def test_requires_a_start_url():
     with pytest.raises(ValueError):
         DiscoveryCrawler(FakeDriver({})).discover([])
+
+
+def test_default_classifier_is_rule_based_and_receives_the_final_url():
+    login_elements = lambda: [  # noqa: E731
+        Element(tag="input", attributes={"type": "password"}, computed={"visible": True}),
+        Element(
+            tag="button",
+            attributes={"type": "submit"},
+            text_content="Go",
+            computed={"visible": True},
+        ),
+    ]
+
+    class LoginSite(FakeDriver):
+        def get_elements(self):
+            return login_elements()
+
+    manifest = DiscoveryCrawler(LoginSite({"https://e.com/": ([], "x")})).discover(
+        ["https://e.com/"]
+    )
+    assert manifest.pages[0].page_type == "login"
+
+
+def test_classifier_none_skips_classification():
+    pages = {"https://e.com/": ([], "home")}
+    manifest = DiscoveryCrawler(FakeDriver(pages), classifier=None).discover(["https://e.com/"])
+    assert manifest.pages[0].page_type == m.UNKNOWN_PAGE_TYPE
+
+
+def test_classifier_is_called_with_elements_and_final_url():
+    calls = []
+    pages = {"https://e.com/": (["https://e.com/old"], "home"), "https://e.com/new": ([], "new")}
+    driver = FakeDriver(pages, redirects={"https://e.com/old": "https://e.com/new"})
+    DiscoveryCrawler(driver, classifier=lambda elements, url: calls.append(url) or "x").discover(
+        ["https://e.com/"]
+    )
+    assert calls == ["https://e.com/", "https://e.com/new"]
+
+
+def test_failures_are_logged_as_structured_records(captured_logs):
+    pages = {"https://e.com/": (["https://e.com/down"], "home")}
+    crawl(pages, broken={"https://e.com/down"})
+    warnings = [r for r in captured_logs if r["level"] == "WARN"]
+    assert [w["message"] for w in warnings] == ["could not load page"]
+    assert warnings[0]["logger"] == "healix.discovery.crawler"
+    assert warnings[0]["meta"]["url"] == "https://e.com/down"
+    assert warnings[0]["meta"]["error_type"] == "TimeoutError"
+
+
+def test_discovery_start_and_finish_are_logged(captured_logs):
+    manifest, _ = crawl({"https://e.com/": ([], "home")})
+    messages = [r["message"] for r in captured_logs if r["level"] == "INFO"]
+    assert messages == ["discovery started", "discovery finished"]
+    finished = next(r for r in captured_logs if r["message"] == "discovery finished")
+    assert finished["meta"]["status"] == "complete"
+    assert finished["meta"]["pages_discovered"] == 1
+    assert finished["meta"]["run_id"] == manifest.run_id

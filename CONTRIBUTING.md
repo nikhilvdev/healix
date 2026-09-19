@@ -63,6 +63,9 @@ raised as an issue and discussed *before* code is written.
 - **Generic first, vendor-specific never required.** Iframe traversal, shadow DOM piercing,
   and ID normalization are generic. Platform adapters (SAP UI5, Salesforce LWC) are additive
   only, and a test with every adapter disabled must still pass on the generic pipeline.
+- **Log through `healix.log`.** `logger = get_logger(__name__)`, a short constant message, and
+  metadata as keyword arguments (`logger.warn("could not load page", url=url, error=str(exc))`).
+  Not stdlib `logging`, not `print`. Never log credentials, tokens, cookies, or input values.
 - **Capture full detail at extraction time.** Never a curated subset, never deferred to a
   later pass.
 - **Healing must reject weak matches.** Attribute weights are unequal (stable signals over
@@ -72,7 +75,9 @@ raised as an issue and discussed *before* code is written.
 
 Some things are documented in more than one place. Change them together:
 
-- **A new page type** → the classification table in the README and `classification/rules.py`.
+- **A new page type** → the classification table in the README and `classification/rules.py`
+  (a test fails if the two disagree). Add a rendered fixture page for it, plus one for any
+  look-alike it could be confused with.
 - **A new locator strategy** → its priority position in `healing/scorer.py` and in the
   README's description of the resolver.
 - **A new event type** → `events/schema.py` and the event table, in the same change.

@@ -13,7 +13,6 @@ discoverable this way.
 
 from __future__ import annotations
 
-import logging
 import os
 import uuid
 from collections import Counter, deque
@@ -22,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from healix.classification import classify
 from healix.discovery import manifest as m
 from healix.discovery.manifest import (
     Manifest,
@@ -31,8 +31,9 @@ from healix.discovery.manifest import (
     template_key,
 )
 from healix.driver.base import Driver, Element
+from healix.log import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DOMAIN_SCOPES = ("same_domain", "same_origin")
 DEDUPE_MODES = ("url_normalized", "url_normalized_and_structural_hash")
@@ -82,7 +83,8 @@ _NON_PAGE_EXTENSIONS = frozenset(
     }
 )
 
-Classifier = Callable[[list[Element]], str]
+# (elements, final URL) -> page type. ``healix.classification.classify`` fits this shape.
+Classifier = Callable[[list[Element], str], str]
 
 
 @dataclass
@@ -121,9 +123,10 @@ class DiscoveryConfig:
 class DiscoveryCrawler:
     """Discover all reachable pages through a ``Driver`` and produce a ``Manifest``.
 
-    ``classifier`` (Phase 3) assigns each page's provisional ``page_type`` from
-    its elements; without one, pages are ``"unknown"``. ``on_page_discovered`` is
-    called with each new manifest page as it is recorded.
+    ``classifier`` assigns each page's provisional ``page_type`` from its elements
+    and URL; it defaults to the rule-based ``healix.classification.classify``. Pass
+    ``None`` to skip classification (every page is then ``"unknown"``).
+    ``on_page_discovered`` is called with each new manifest page as it is recorded.
     """
 
     def __init__(
@@ -131,7 +134,7 @@ class DiscoveryCrawler:
         driver: Driver,
         config: DiscoveryConfig | None = None,
         *,
-        classifier: Classifier | None = None,
+        classifier: Classifier | None = classify,
         on_page_discovered: Callable[[ManifestPage], None] | None = None,
     ) -> None:
         self.driver = driver
@@ -159,6 +162,13 @@ class DiscoveryCrawler:
         scope = _Scope(config.domain_scope, starts)
         manifest = Manifest(run_id=run_id or uuid.uuid4().hex[:12], start_urls=list(start_urls))
 
+        logger.info(
+            "discovery started",
+            run_id=manifest.run_id,
+            start_urls=starts,
+            max_pages=config.max_pages,
+            domain_scope=config.domain_scope,
+        )
         queue: deque[str] = deque(dict.fromkeys(starts))
         deferred: deque[str] = deque()
         seen: set[str] = set(queue)  # ever queued
@@ -197,6 +207,13 @@ class DiscoveryCrawler:
         finally:
             if manifest_path is not None:
                 manifest.save(manifest_path)
+            logger.info(
+                "discovery finished",
+                run_id=manifest.run_id,
+                status=manifest.discovery_status,
+                visits=visits,
+                pages_discovered=manifest.pages_discovered,
+            )
         return manifest
 
     def _visit(self, url: str, manifest: Manifest, scope: _Scope, visited: set[str]) -> list[str]:
@@ -204,7 +221,9 @@ class DiscoveryCrawler:
         try:
             self.driver.navigate(url)
         except Exception as exc:
-            logger.warning("could not load %s: %s", url, exc)
+            logger.warn(
+                "could not load page", url=url, error=str(exc), error_type=type(exc).__name__
+            )
             manifest.add_failed(url, str(exc))
             visited.add(url)
             return []
@@ -212,21 +231,26 @@ class DiscoveryCrawler:
         final = _safe_normalize(self.driver.current_url) or url
         visited.add(url)
         if final in visited and final != url:
-            logger.debug("%s redirected to already-visited %s", url, final)
+            logger.debug("redirected to an already-visited page", url=url, final_url=final)
             return []
         visited.add(final)
         if not scope.allows(final):
-            logger.info("%s redirected out of scope to %s; skipping", url, final)
+            logger.info("redirected out of scope; skipping", url=url, final_url=final)
             return []
 
         try:
             elements = self.driver.get_elements()
         except Exception as exc:
-            logger.warning("could not extract elements from %s: %s", final, exc)
+            logger.warn(
+                "could not extract elements",
+                url=final,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             manifest.add_failed(final, str(exc))
             return []
         page_hash = structural_hash(elements)
-        page_type = self.classifier(elements) if self.classifier else m.UNKNOWN_PAGE_TYPE
+        page_type = self.classifier(elements, final) if self.classifier else m.UNKNOWN_PAGE_TYPE
         page, is_new = manifest.add_page(
             final,
             page_hash,
@@ -234,10 +258,13 @@ class DiscoveryCrawler:
             dedupe_structural=self.config.dedupe_by == "url_normalized_and_structural_hash",
         )
         if is_new:
+            logger.debug(
+                "page discovered", url=final, page_type=page_type, structural_hash=page_hash
+            )
             if self.on_page_discovered:
                 self.on_page_discovered(page)
         else:
-            logger.debug("%s has the same structure as %s", final, page.url)
+            logger.debug("same structure as an existing page", url=final, representative=page.url)
 
         # Links are followed from every visited page, including structural duplicates —
         # a repeated template can still link somewhere new.

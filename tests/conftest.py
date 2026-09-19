@@ -92,3 +92,27 @@ def crawl_site_url(tmp_path_factory):
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture(scope="session")
+def classify_site_url():
+    """Realistic page fixtures for each page type, served over HTTP."""
+    server = _serve(Path(__file__).parent / "fixtures" / "classify")
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def captured_logs():
+    """Capture every Healix log record emitted during a test (all levels), then restore logging."""
+    from logquill import CollectingTransport
+
+    from healix.log import configure_logging, get_logger
+
+    root = get_logger()
+    saved_transports, saved_level = root.transports, root.level
+    transport = CollectingTransport()
+    configure_logging(level="trace", transports=[transport])
+    yield transport.records
+    configure_logging(level=saved_level, transports=saved_transports)

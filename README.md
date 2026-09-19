@@ -10,9 +10,9 @@ self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
 **Status: pre-release, under active development.** The driver abstraction (Playwright),
-iframe/shadow-DOM traversal, stable-ID normalization, and Phase A page discovery with
-its manifest are implemented and tested. Classification, the extraction writer,
-login handling, the healing scorer and store, the Selenium adapter, script generation,
+iframe/shadow-DOM traversal, stable-ID normalization, Phase A page discovery with its
+manifest, and rule-based page classification are implemented and tested. The extraction
+writer, login handling, the healing scorer and store, the Selenium adapter, script generation,
 and the SDK/CLI/event surface are **not built yet** — see the [Roadmap](#roadmap) and
 `CHANGELOG.md`. Nothing is published to PyPI yet.
 
@@ -39,11 +39,18 @@ Available now:
   `/product/456` on one template become one manifest entry
 - **Resumable manifest** — per-page `pending | extracted | failed` status, atomic writes,
   and a `remaining_pages()` resume set
-- **Zero required runtime dependencies** — Playwright is an optional extra
+- **Rule-based page classification** — labels each page `login`, `dashboard`, `list`,
+  `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`, or `unknown` from element
+  and URL heuristics. Deterministic, no LLM, no network; every decision comes with the
+  scores and signals behind it — see [Page classification](#page-classification)
+- **Structured logging via [logquill](https://pypi.org/project/logquill/)** — JSON-line
+  records with metadata instead of formatted strings; quiet by default, one call to
+  reconfigure — see [Logging](#logging)
+- **One small runtime dependency** — `logquill`, which itself has none. Playwright is an
+  optional extra
 - **Typed throughout** — `mypy --strict` clean
 
-Planned (see [Roadmap](#roadmap)): rule-based page classification, sequential extraction to
-per-page JSON, auto-detected login with `.env` credentials, weighted and threshold-gated
+Planned (see [Roadmap](#roadmap)): sequential extraction to per-page JSON, auto-detected login with `.env` credentials, weighted and threshold-gated
 self-healing with a persistent fingerprint store, a Selenium adapter, script generation,
 and the SDK / CLI / webhook surface.
 
@@ -139,6 +146,26 @@ pending unknown https://example.com/
 
 (`example.com` links only to another domain, so there is nothing else in scope.)
 
+### Classify a page
+
+```python
+from healix.classification import classify, classify_page
+from healix.driver.playwright_adapter import PlaywrightDriverAdapter
+
+with PlaywrightDriverAdapter() as driver:
+    driver.navigate("https://github.com/login")
+    elements = driver.get_elements()
+
+    print(classify(elements, driver.current_url))  # login
+
+    result = classify_page(elements, driver.current_url)
+    print(result.page_type, result.confidence)  # login 1.0
+    print(result.signals["login"])  # ['password_input', 'submit_control', 'few_fields', 'login_cue']
+```
+
+`DiscoveryCrawler` runs this on every page it visits, so each manifest entry already has
+a `page_type`.
+
 ### Resume from a manifest
 
 ```python
@@ -232,6 +259,8 @@ Every element captures maximum raw detail at extraction time. This is real outpu
     "readonly": null,
     "required": null,
     "focused": false,
+    "position": "static",
+    "z_index": null,
     "href": "https://iana.org/domains/example"
   },
   "xpath": "/html[1]/body[1]/div[1]/p[2]/a[1]",
@@ -254,6 +283,8 @@ Notes on individual fields:
 - `text_content` is the element's **own** text nodes only, so parents don't repeat their children's text.
 - `xpath` is relative to the element's nearest root — the document, or its shadow root.
 - `bounding_box` is relative to the element's own frame viewport, not the page.
+- `computed.position` and `computed.z_index` (the CSS values, `null` for `auto`) are what the
+  `modal` classifier reads to spot overlays.
 - `computed.href` is the browser-resolved absolute URL (it honors `<base href>`) on links, `null` elsewhere.
 - Input `value` is deliberately **not** captured, so filled-in passwords never reach output JSON.
 - Non-rendered tags (`script`, `style`, `head`, `title`, `meta`, `link`, `template`, `noscript`, `base`) are skipped; everything else is captured.
@@ -319,11 +350,105 @@ of distinct pages. With 200 product links and `max_pages=50`, `/about` still get
   `complete` means pages may be missing. `manifest_path` is written even on interruption.
 - `status` is `pending`, `extracted`, or `failed`. A page that fails to load, or whose
   elements can't be read, is recorded as `failed` with an `error`, and the crawl continues.
-- `page_type` is `"unknown"` until [classification](#roadmap) lands; pass a
-  `classifier=` callable to `DiscoveryCrawler` to set it in the meantime.
+- `page_type` comes from [`classify`](#page-classification) by default. Pass your own
+  `classifier=(elements, url) -> str`, or `classifier=None` to skip classification (every
+  page is then `"unknown"`).
 - `on_page_discovered=` is called once per new manifest entry as it is recorded.
 
 Manifest writes are atomic (temp file + rename), so a crash never leaves a truncated file.
+
+## Page classification
+
+`classify(elements, url="")` labels a page with one of nine types, or `"unknown"`. It is
+pure element-count and attribute heuristics over the `Element` list and the URL — no LLM
+calls, no network, no randomness — so the same page always gets the same answer. Only
+*visible* elements vote, so hidden templates and collapsed panels don't skew a result.
+
+| Type | Detection heuristic |
+|---|---|
+| `login` | A single password input plus a submit control and few other fields, with a sign-in cue in the URL or a heading; or an OAuth/SSO redirect URL with "Sign in with…" buttons (no password field needed). Sign-up cues count against it |
+| `dashboard` | Several KPI/summary widgets and charts (`canvas`, chart-library markup), few inputs, an overview/dashboard cue |
+| `list` | Repeating row structures (table rows, cards) outside navigation, plus pagination controls |
+| `detail` | Single-entity display: one `h1`, key/value pairs (`dl`, read-only fields), text content, no repeating rows, an entity-shaped URL such as `/product/123` |
+| `form` | High input-field-to-text ratio, several fields, and a submit/save control |
+| `search` | A search input, filter controls (selects, checkboxes), and a results area — a header search box alone is not enough |
+| `checkout` | Payment-field patterns (`cc-number`, CVC, expiry…), multi-step indicators, checkout cues |
+| `nav_shell` | Mostly navigation links, low input density, little prose |
+| `modal` | A dialog (`role="dialog"`, `aria-modal`, `<dialog open>`) or a large high-`z-index` fixed overlay that *dominates* the page |
+
+### How a type is chosen
+
+Each type has a rule that awards weighted **signals** (weights sum to 1.0) and a few
+penalties. A page gets a type when its score reaches **0.5**. When several types score
+within **0.15** of the best, the most specific wins, in this order: `modal`, `login`,
+`checkout`, `search`, `form`, `list`, `dashboard`, `detail`, `nav_shell`. That is how a
+login form (structurally also a small form) is called a login, and a results page (also a
+form and a list) is called a search. If nothing reaches 0.5 the answer is `"unknown"` — an
+honest "no rule matched" rather than a weak guess.
+
+`classify_page` returns the evidence — every type's score and the signals that fired — so a
+surprising label is debuggable, and `confidence` lets callers ignore low-confidence labels:
+
+```python
+result = classify_page(elements, url)  # a product grid with a header search box
+result.page_type   # "list"
+result.confidence  # 0.9
+result.scores      # {"login": 0.15, "dashboard": 0.15, "list": 0.9, "detail": 0.1, "form": 0.45,
+                   #  "search": 0.0, "checkout": 0.0, "nav_shell": 0.7, "modal": 0.0}
+result.signals["list"]       # ["repeating_rows", "pagination", "few_fields"]
+result.signals["nav_shell"]  # [..., "-repeating_content_rows"]  (a "-" prefix is a penalty)
+```
+
+### Accuracy and limits
+
+These are heuristics, not a guarantee. The rules are exercised against realistic rendered
+pages for every type and for the look-alikes that trip naive rules (a registration form with
+a password field, a header search box on a product grid, a cookie banner on an article), and
+spot-checked against public sites — login pages on GitHub and two practice sites, list pages
+on Hacker News and two scraping sandboxes, a DuckDuckGo results page. Expect misses on
+unusual layouts.
+
+- **Article and other long-form content has no type.** It typically comes back `unknown`, or
+  `nav_shell` at the minimum 0.5 score on link-heavy pages such as a Wikipedia article.
+- **A thin cookie banner or toast is deliberately not a `modal`** (a container must be at
+  least 150px tall and cover or hold most of the page), so a page carrying one keeps its
+  real type. A blocking, full-page overlay is a `modal`.
+- A page can legitimately be two things (a search page is also a list). The priority order
+  picks one; `result.scores` shows the runner-up.
+
+## Logging
+
+Healix logs through [logquill](https://pypi.org/project/logquill/): every record is a short
+constant message plus structured metadata, rendered as one JSON line —
+
+```json
+{"timestamp":"2026-09-19T17:24:53.728Z","level":"INFO","logger":"healix.discovery.crawler","message":"discovery finished","meta":{"run_id":"demo","status":"complete","visits":1,"pages_discovered":1}}
+```
+
+By default only `WARN` and above are shown, on **stderr** (stdout stays free for program
+output). Turn up the detail with the environment or in code:
+
+```bash
+HEALIX_LOG_LEVEL=debug python my_crawl.py
+```
+
+```python
+from logquill import FileTransport
+from healix.log import configure_logging
+
+configure_logging(level="info")                                 # just change the level
+configure_logging(transports=[FileTransport("healix.log")])     # send records elsewhere
+configure_logging(transports=[])                                # silence Healix entirely
+```
+
+Levels: `info` records discovery start and finish, `debug` adds every discovered page, every
+classification with its scores, redirects, and skipped frames; `warn` reports pages that
+failed to load and frames that couldn't be read. Any logquill transport or plugin works —
+see the [logquill docs](https://github.com/nikhilvdev/logquill-python).
+
+In your own code around Healix, `from healix.log import get_logger` gives you a logger under
+the same configuration. `configure_logging` updates every Healix logger, including ones
+created before it was called.
 
 ## Design decisions
 
@@ -357,6 +482,7 @@ These are fixed unless explicitly reopened:
   manifest entry.
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
+- **Classification is heuristic** — see [Accuracy and limits](#accuracy-and-limits).
 - Authenticated crawling arrives with the login handler; today discovery sees only what an
   anonymous browser sees.
 
@@ -366,7 +492,7 @@ These are fixed unless explicitly reopened:
 |---|---|---|
 | 1 | `Driver` ABC, Playwright adapter, iframe + shadow DOM traversal, ID normalization | ✅ Done |
 | 2 | Phase A discovery, manifest, dedup, per-page status | ✅ Done |
-| 3 | Rule-based page classification (`login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`) | Planned |
+| 3 | Rule-based page classification (`login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`), and logquill-based logging | ✅ Done |
 | 4 | Phase B sequential extraction — one JSON file per page | Planned |
 | 5 | SDK (`Crawler`, `Extractor`, `Healer`, `ScriptGenerator`), CLI, event schema and webhooks | Planned |
 | 6 | Auto-detected login with `.env` credentials, MFA abort, mid-crawl re-login | Planned |

@@ -37,7 +37,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["logquill>=1.0"]
 
 [project.optional-dependencies]
 # Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
