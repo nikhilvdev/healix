@@ -12,8 +12,9 @@ external orchestration platforms through an SDK, a CLI, and webhooks.
 **Status: pre-release, under active development.** The driver abstraction (Playwright),
 iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
-surface are implemented and tested. Login handling, the healing scorer and store, the Selenium
-adapter, and script generation are **not built yet** — see the [Roadmap](#roadmap) and
+surface are implemented and tested, and so is automatic login (username/password, SSO, session
+expiry). The healing scorer and store, the Selenium adapter, and script generation are **not
+built yet** — see the [Roadmap](#roadmap) and
 `CHANGELOG.md`. Nothing is published to PyPI yet.
 
 ## Features
@@ -61,9 +62,13 @@ Available now:
 - **A run config that is safe to commit** — credential-looking keys are rejected, pointing you at
   `.env` — see [Run configuration](#run-configuration)
 
-Planned (see [Roadmap](#roadmap)): auto-detected login with `.env` credentials, weighted and
-threshold-gated self-healing with a persistent fingerprint store, a Selenium adapter, and
-script generation.
+- **Automatic login** — a page classified `login` is filled in with credentials from `.env`,
+  including a single-sign-on redirect and POST-back. If the session expires mid-crawl it logs in
+  again and resumes. It aborts cleanly on MFA, never submits a password twice, and never types
+  credentials where it shouldn't — see [Authentication](#authentication)
+
+Planned (see [Roadmap](#roadmap)): weighted and threshold-gated self-healing with a persistent
+fingerprint store, a Selenium adapter, and script generation.
 
 ## Install
 
@@ -320,18 +325,21 @@ from healix import Crawler, Extractor
 
 | | |
 |---|---|
-| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True)` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
-| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True)` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True)` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
+| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True)` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
 
 `config` is a path to a run-config JSON, a dict, or a `RunConfig`. Both calls return a `Run`:
 `run.run_id`, `run.pages` (manifest entries), `run.pages_discovered`, `run.pages_extracted`,
-`run.pages_failed`, `run.platform_detected`, `run.discovery_status`, `run.manifest_path`,
-`run.summary()`.
+`run.pages_failed`, `run.platform_detected`, `run.discovery_status`, `run.blocked_on_auth`,
+`run.manifest_path`, `run.summary()`.
 
 - **The browser.** Unless you pass a `driver`, the SDK launches and closes its own (Playwright,
   headless by default). A `driver` you pass is used as-is and its lifecycle stays yours.
-- **`.env`.** The SDK does not read `.env`. If you keep `HEALIX_WEBHOOK_SECRET` there, call
-  `dotenv.load_dotenv()` first, or pass `webhook_secret=`.
+- **`.env`.** The SDK does not read `.env`. If you keep the login credentials or
+  `HEALIX_WEBHOOK_SECRET` there, call `dotenv.load_dotenv()` first, or pass `credentials=` /
+  `webhook_secret=`.
+- **Login.** Automatic and on by default; `credentials=Credentials(username, password)` overrides the
+  environment and `auto_login=False` turns it off. See [Authentication](#authentication).
 - **`Extractor` output location.** Given a manifest *path* and no `config`, output goes beside the
   manifest. With a `config`, it goes to `crawl.extraction.output_path`.
 - **Errors.** `ConfigError` (bad config), `RunConflictError` (see below),
@@ -353,9 +361,9 @@ to resume it, or choose another output path.
 
 ```bash
 healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only]
-               [--webhook-url URL] [--headed] [--json] [--log-level LEVEL]
+               [--webhook-url URL] [--headed] [--no-login] [--json] [--log-level LEVEL]
 healix extract --manifest output/manifest.json [--config run_config.json]
-               [--webhook-url URL] [--headed] [--json] [--log-level LEVEL]
+               [--webhook-url URL] [--headed] [--no-login] [--json] [--log-level LEVEL]
 healix --version          # also: python -m healix
 ```
 
@@ -367,7 +375,8 @@ healix --version          # also: python -m healix
   the SDK, so the events are exactly what `on_event` receives.
 - `--json` prints the run summary as one JSON line on stdout instead of the human text. Logs go to
   stderr (JSON lines, `WARN` and above by default; `--log-level` changes it).
-- The CLI loads a `.env` from the current directory.
+- `--no-login` turns automatic login off.
+- The CLI loads a `.env` from the current directory (that is where the login credentials can live).
 
 | Exit status | Meaning |
 |---|---|
@@ -375,6 +384,7 @@ healix --version          # also: python -m healix
 | `1` | Runtime error (browser failure, backend unavailable, …) |
 | `2` | Usage or configuration error, including a run conflict |
 | `3` | The run finished, but some pages failed (`--run-id` the same id to retry them) |
+| `4` | Blocked on authentication: a login page was reached but no credentials are set |
 | `130` | Interrupted. Progress is saved; the message says how to resume |
 
 ## Events
@@ -402,9 +412,13 @@ it is final. A `login_failed` `reason` is one of `mfa_required`, `timeout`, `sel
 `auth_rejected`.
 
 **Emitted today:** `page_discovered` (once per new manifest entry), `page_extracted` (once per page
-written), and `run_complete` (last). **Defined but not emitted yet:** `element_healed`,
-`script_generated`, and `login_failed` — they arrive with self-healing, script generation, and login
-handling. The schema, in `healix.events`, already includes them.
+written), `login_failed` (once per failed login — see [Authentication](#authentication)), and
+`run_complete` (last). **Defined but not emitted yet:** `element_healed` and `script_generated` —
+they arrive with self-healing and script generation. The schema, in `healix.events`, already
+includes them.
+
+A `login_failed` `url` never carries a query string (SSO redirect URLs hold `state` and `code`),
+and `screenshot_ref` is a path relative to the output directory, or `null`.
 
 ### Webhooks
 
@@ -432,6 +446,93 @@ slow endpoint never stalls the crawl.
 - Delivery is best-effort: events are queued in memory (up to 1000) and flushed when the run ends.
   It is not a durable queue — if you can't afford to miss an event, treat the manifest as the source
   of truth.
+
+## Authentication
+
+Login is not a configuration step. When discovery or extraction lands on a page the classifier
+calls `login`, Healix fills it in and carries on — one credential per run.
+
+**Credentials** come from the environment, never from the run config:
+
+```bash
+# .env  (git-ignored; see .env.example)
+WEBLIB_LOGIN_USERNAME=alice@example.com
+WEBLIB_LOGIN_PASSWORD=...
+```
+
+The CLI loads `.env` from the current directory. In the SDK, call `dotenv.load_dotenv()` or pass
+`Crawler(config, credentials=Credentials(username, password))`.
+
+### What it handles
+
+- **A username + password form**, including one inside an iframe or shadow root.
+- **Single sign-on.** A page offering only "Sign in with SSO" is clicked through to the identity
+  provider and back, whether it returns by redirect or by an auto-submitted POST form, including
+  providers that ask for the username and the password on separate screens.
+- **Session expiry.** A page that redirects to the login after you have logged in triggers a new
+  login, then the page is loaded again and the crawl resumes where it stopped. This works during
+  discovery and during extraction.
+- **Guided and autonomous modes.** A guided run that starts at the login page logs in there and
+  continues past it; an autonomous run logs in the first time a page bounces to a login.
+
+### What it will not do
+
+The failure modes are fixed, and none of them can hang or loop:
+
+- **MFA cannot be completed automatically.** The attempt is aborted with `login_failed`
+  (`mfa_required`) — the one-time-code form is never touched.
+- **A password is never submitted twice in one attempt.** If the site sends you back to the same
+  form, that is `auth_rejected`; retrying risks locking the account.
+- **A failure ends login for the rest of the run.** Pages that needed it are recorded as `failed`
+  (`requires authentication, and the login did not succeed`); nothing is retried.
+- **A session that keeps expiring is bounded** — at most three logins per run, then `auth_rejected`.
+- **Every login has a deadline** (30 seconds) and a step limit; a form that goes nowhere is
+  `timeout`.
+- CAPTCHAs, passkeys/WebAuthn, and hardware keys are not supported; they end as `timeout` or
+  `auth_rejected`. Multiple roles are out of scope for now.
+
+| `login_failed` reason | When |
+|---|---|
+| `mfa_required` | A one-time-code / second-factor prompt appeared |
+| `auth_rejected` | The site refused the credentials, sent the form back, or the session keeps ending |
+| `timeout` | The form was submitted but nothing changed before the deadline |
+| `selector_not_found` | No usable login form: no password field, no submit control, or the page was not one it is willing to fill in (see below) |
+
+A failure also saves a screenshot to `<output>/screenshots/login-failed-N.png` and reports it in the
+event. It may show the username you typed (never the password, which the browser masks) — treat
+`output/` as sensitive.
+
+### Blocked on auth
+
+With **no credentials set**, reaching a login page does not fail the login — the run is flagged
+`blocked_on_auth` (in the manifest, on `Run`, in `--json` output; the CLI exits `4`), one warning is
+logged, and the pages behind the login are recorded as `failed` with
+`requires authentication, and no credentials are set`. No `login_failed` event is raised: the
+event's reasons describe a login that was attempted. Set the two variables and re-run with the same
+`run_id`; a blocked run is *discovered again*, since what is behind the login was never seen.
+
+### Where credentials are typed
+
+Credentials are typed only on **in-scope pages**, or on pages whose URL host or path looks like an
+OAuth/SSO endpoint (`/oauth/…`, `/authorize`, `/saml`, `/sso`, `okta.com`, `accounts.google.com`,
+and so on). The query string never counts — anyone can append `?client_id=` to a URL. An unexpected
+redirect to some other login page is refused, and nothing is typed.
+
+Before typing, the handler also checks the form itself: exactly one password field. A registration
+page (two password fields) that was misclassified as a login is left alone.
+
+> **Limit of that guard.** It stops *accidental* credential entry. It is not a defence against a
+> hostile site: an application chooses its own identity provider, so a site you point Healix at and
+> give credentials to can send them anywhere a real SSO flow could. Only use credentials for sites
+> you trust with them — the same trust you place in typing them into the site's own login form.
+
+### Secrets stay out of everything
+
+The credentials are never logged, never put in an event, and never written to disk; a
+`Credentials` object prints as `Credentials(username='***', password='***')`. URLs in logs and in
+`login_failed` events drop their query string. A test crawls with a distinctive password and checks
+that neither it nor the username appears in any log record, event, summary, manifest, or output
+file.
 
 ## How it works
 
@@ -588,6 +689,7 @@ of distinct pages. With 200 product links and `max_pages=50`, `/about` still get
   "pages_discovered": 1,
   "pages_extracted": 0,
   "platform_detected": null,
+  "blocked_on_auth": false,
   "pages": [
     {
       "url": "https://example.com/",
@@ -602,6 +704,8 @@ of distinct pages. With 200 product links and `max_pages=50`, `/about` still get
 }
 ```
 
+- `blocked_on_auth` is `true` when a login page was reached but no credentials were set; the
+  pages behind it are then recorded as `failed` (see [Authentication](#authentication)).
 - `discovery_status` is `complete`, `max_pages_reached`, or `interrupted`. Anything but
   `complete` means pages may be missing. `manifest_path` is written even on interruption.
 - `status` is `pending`, `extracted`, or `failed`. A page that fails to load, or whose
@@ -701,7 +805,7 @@ calls, no network, no randomness — so the same page always gets the same answe
 
 | Type | Detection heuristic |
 |---|---|
-| `login` | A single password input plus a submit control and few other fields, with a sign-in cue in the URL or a heading; or an OAuth/SSO redirect URL with "Sign in with…" buttons (no password field needed). Sign-up cues count against it |
+| `login` | A single password input plus a submit control and few other fields, with a sign-in cue in the URL or a heading; or an OAuth/SSO redirect URL, or an app sign-in page that offers only SSO (an SSO button plus a `/login`-style URL or a "Sign in" heading). Sign-up cues count against it |
 | `dashboard` | Several KPI/summary widgets and charts (`canvas`, chart-library markup), few inputs, an overview/dashboard cue |
 | `list` | Repeating row structures (table rows, cards) outside navigation, plus pagination controls |
 | `detail` | Single-entity display: one `h1`, key/value pairs (`dl`, read-only fields), text content, no repeating rows, an entity-shaped URL such as `/product/123` |
@@ -797,7 +901,9 @@ These are fixed unless explicitly reopened:
   commit — the config parser enforces this by rejecting credential-looking keys. Copy
   [`.env.example`](.env.example) to `.env` (git-ignored).
 - **Login is a page classification**, not a separate config step. A page classified `login`
-  is handed to a login handler that applies `.env` credentials.
+  is handed to a login handler that applies `.env` credentials. It aborts on MFA, submits a
+  password at most once per attempt, and gives up rather than retry — see
+  [Authentication](#authentication).
 - **Platform adapters are additive.** SAP UI5 and Salesforce LWC adapters, when they land,
   only add signal on top of the generic pipeline, which always runs on its own.
 - **Healing must reject weak matches.** Attributes are weighted (stable signals over volatile
@@ -811,9 +917,9 @@ These are fixed unless explicitly reopened:
 - **Closed shadow roots** are not reachable.
 - **Cross-origin iframes** are listed but not extracted, and a same-origin frame nested
   inside a cross-origin one is skipped too.
-- **Extraction reads a page as a fresh, anonymous visit.** Client-side state, filled-in forms,
-  and anything behind a login are not reproduced (login handling is planned). If a page
-  redirects to a login page, that is what gets extracted — and classified.
+- **Extraction reads a page from a fresh navigation.** Client-side state and filled-in forms are
+  not reproduced. The browser keeps its login session across the run, but with `--no-login`, no
+  credentials, or a failed login, a page that redirects to a login page is recorded as `failed`.
 - **Script-only navigation** — buttons and router pushes with no `<a href>` — is invisible
   to discovery.
 - **Client-rendered sites that never go network-idle** may be read before they finish
@@ -825,8 +931,9 @@ These are fixed unless explicitly reopened:
 - **`Healer`, `ScriptGenerator`, and `healix generate` do not exist yet**, and neither does the
   Selenium backend (`backend: "selenium"` is accepted but raises).
 - **Classification is heuristic** — see [Accuracy and limits](#accuracy-and-limits).
-- Authenticated crawling arrives with the login handler; today discovery sees only what an
-  anonymous browser sees.
+- **Login covers the common shapes only** — see [What it will not do](#what-it-will-not-do). A
+  login that lives in a pop-up window or a cross-origin iframe is not handled. Login detection
+  relies on the classifier, so a login page it does not recognise is treated as an ordinary page.
 
 ## Roadmap
 
@@ -837,7 +944,7 @@ These are fixed unless explicitly reopened:
 | 3 | Rule-based page classification (`login`, `dashboard`, `list`, `detail`, `form`, `search`, `checkout`, `nav_shell`, `modal`), and logquill-based logging | ✅ Done |
 | 4 | Sequential extraction — one JSON file per page, resumable | ✅ Done |
 | 5 | SDK (`Crawler`, `Extractor`), CLI (`crawl`, `extract`), event schema and webhooks | ✅ Done |
-| 6 | Auto-detected login with `.env` credentials, MFA abort, mid-crawl re-login | Planned |
+| 6 | Auto-detected login with `.env` credentials, SSO, MFA abort, mid-crawl re-login | ✅ Done |
 | 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, SQLite/Postgres store | Planned |
 | 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | Planned |
 | 9 | Packaging, `healix doctor`, PyPI release | Planned |

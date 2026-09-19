@@ -59,6 +59,10 @@ raised as an issue and discussed *before* code is written.
   rule-based so runs are deterministic and cost nothing.
 - **The run config never holds secrets, and the parser enforces it.** `RunConfig` rejects
   credential-looking keys; don't loosen that check to make a new option convenient.
+- **Login credentials are never logged, evented, or written to disk.** `Credentials` masks itself,
+  log/exception messages from the login path carry only error *types*, and URLs are logged without
+  their query string. The login handler must keep submitting a password at most once per attempt
+  and giving up after a failure; the tests break if either is removed.
 - **No credentials in committed files.** Secrets live in `.env` (git-ignored), never in
   `run_config.json`, fixtures, logs, manifests, or events. Ship placeholders only in
   `.env.example`.

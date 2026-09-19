@@ -42,7 +42,7 @@ def test_discover_and_extract_produces_a_run_with_pages_and_files(tmp_path):
     assert Manifest.load(run.manifest_path).pages_extracted == 3
     assert set(run.summary()) == {
         "run_id", "discovery_status", "pages_discovered", "pages_extracted", "pages_failed",
-        "platform_detected", "manifest_path",
+        "platform_detected", "blocked_on_auth", "manifest_path",
     }  # fmt: skip
 
 

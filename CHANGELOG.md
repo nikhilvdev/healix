@@ -4,10 +4,44 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. The first five milestones of the build
-plan are implemented; login, healing, the Selenium adapter, and script generation are not.
+Pre-release: nothing is published to PyPI yet. The first six milestones of the build
+plan are implemented; healing, the Selenium adapter, and script generation are not.
 
 ### Added
+
+- **Automatic login.**
+  - `healix.auth.LoginHandler`: when discovery or extraction lands on a page classified `login`, it
+    fills and submits the form with credentials from `WEBLIB_LOGIN_USERNAME` /
+    `WEBLIB_LOGIN_PASSWORD` (or `Crawler(..., credentials=Credentials(...))`), then the crawl
+    continues. Handles a username + password form (also in iframes and shadow roots), a
+    single-sign-on redirect or POST-back including identifier-first providers, and **session
+    expiry**: a page that bounces to a login after logging in triggers a new login, the page is
+    loaded again, and the crawl resumes. Works during both discovery and extraction, in guided and
+    autonomous mode.
+  - Safe by construction: MFA is detected and aborted (`login_failed`, `mfa_required`); a password
+    is never submitted twice in one attempt (a repeat is `auth_rejected`); any failure ends login
+    for the rest of the run; re-logins are capped at three; every login has a 30 s deadline and a
+    step limit. Credentials are typed only on in-scope pages or on host/path-recognised SSO
+    endpoints — never on the strength of a query string — and only into a form with exactly one
+    password field.
+  - `login_failed` is now emitted: `url` (no query string), `reason`, and `screenshot_ref`, a
+    screenshot saved under `<output>/screenshots/`.
+  - **Blocked on auth.** With no credentials set, a login page flags the run `blocked_on_auth`
+    (manifest field, `Run.blocked_on_auth`, `--json` output), logs one warning, and records the
+    pages behind it as `failed`. No `login_failed` event is raised for this, since its reasons
+    describe an attempted login. Resuming a blocked run rediscovers.
+  - `Credentials` never shows its values in `repr`/`str`; credentials are never logged, evented, or
+    written to disk. A test crawls with a distinctive password and checks it and the username are
+    absent from every log record, event, summary, manifest, and output file.
+  - CLI: `--no-login`, and exit status `4` for a run blocked on auth. SDK: `credentials=` and
+    `auto_login=` on `Crawler` and `Extractor`.
+  - `Driver.settle()`: a no-op hook adapters can override to wait for in-flight navigation
+    (implemented for Playwright; `navigate` now uses it).
+  - Classification: an app sign-in page that offers only SSO is now a `login` when it has a
+    `/login`-style URL or a "Sign in" heading. An SSO button alone, or the button's own "sign in"
+    wording, is not enough. `is_oauth_url` (host and path only) is public in
+    `healix.classification`.
+  - `Scope` (which URLs a crawl may visit) is now public in `healix.discovery.crawler`.
 
 - **SDK, CLI, and webhooks on one event schema.**
   - `Crawler` (`discover()`, `discover_and_extract()`) and `Extractor` (`extract()`), exported from
@@ -127,6 +161,9 @@ plan are implemented; login, healing, the Selenium adapter, and script generatio
   the MIT `LICENSE`.
 
 ### Changed
+
+- `Manifest` gains `blocked_on_auth` (default `false`; older manifests load unchanged), and
+  `Run.summary()` gains the same key.
 
 - **`Driver.get_elements()` takes a keyword-only `iframe_traversal: bool = True`.** With `False`
   only the main frame is read (open shadow roots are still pierced). Custom `Driver`

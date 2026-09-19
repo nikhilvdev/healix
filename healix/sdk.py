@@ -12,8 +12,12 @@ Both classes take a run config (a path, a dict, or a ``RunConfig``), an optional
 pass a ``driver`` (in which case its lifecycle is yours). ``on_event`` and the webhook
 receive the *same* payload dicts — see ``healix.events``.
 
-The SDK does not read ``.env`` for you: call ``dotenv.load_dotenv()`` first if you keep
-``HEALIX_WEBHOOK_SECRET`` there. (The CLI does.)
+Login is automatic: a page the classifier calls ``login`` is filled and submitted with
+``credentials`` (default: ``WEBLIB_LOGIN_USERNAME`` / ``WEBLIB_LOGIN_PASSWORD`` from the
+environment); pass ``auto_login=False`` to turn it off. See ``healix.auth``.
+
+The SDK does not read ``.env`` for you: call ``dotenv.load_dotenv()`` first if you keep the
+login credentials or ``HEALIX_WEBHOOK_SECRET`` there. (The CLI does.)
 
 Events describe the work done by *this* call: resuming a run whose discovery already
 finished does not re-emit ``page_discovered`` for those pages.
@@ -29,18 +33,21 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from healix.auth import Credentials, LoginHandler
 from healix.config import RunConfig
-from healix.discovery.crawler import DiscoveryCrawler
+from healix.discovery.crawler import DiscoveryCrawler, Scope
 from healix.discovery.manifest import (
     COMPLETE,
     FAILED,
     MAX_PAGES_REACHED,
     Manifest,
     ManifestPage,
+    normalize_url,
 )
 from healix.driver.base import Driver
 from healix.driver.factory import create_driver
 from healix.events import (
+    LOGIN_FAILED,
     PAGE_DISCOVERED,
     PAGE_EXTRACTED,
     RUN_COMPLETE,
@@ -97,6 +104,11 @@ class Run:
     def discovery_status(self) -> str:
         return self.manifest.discovery_status
 
+    @property
+    def blocked_on_auth(self) -> bool:
+        """A login page was reached but no credentials were set (see ``healix.auth``)."""
+        return self.manifest.blocked_on_auth
+
     def summary(self) -> dict[str, Any]:
         """A plain-dict overview of the run (the ``run_complete`` fields, plus a little more)."""
         return {
@@ -106,6 +118,7 @@ class Run:
             "pages_extracted": self.pages_extracted,
             "pages_failed": self.pages_failed,
             "platform_detected": self.platform_detected,
+            "blocked_on_auth": self.blocked_on_auth,
             "manifest_path": str(self.manifest_path),
         }
 
@@ -132,6 +145,8 @@ class _Runner:
         webhook_secret: str | None,
         driver: Driver | None,
         headless: bool,
+        credentials: Credentials | None,
+        auto_login: bool,
     ) -> None:
         self.config = RunConfig.coerce(config, require_start=require_start)
         self.on_event = on_event
@@ -139,6 +154,8 @@ class _Runner:
         self.webhook_secret = webhook_secret or os.environ.get(WEBHOOK_SECRET_ENV) or None
         self._driver = driver
         self.headless = headless
+        self.credentials = credentials
+        self.auto_login = auto_login
 
     @contextlib.contextmanager
     def _session(self, run_id: str) -> Iterator[tuple[Driver, EventEmitter]]:
@@ -154,6 +171,28 @@ class _Runner:
                 driver.start()
                 stack.callback(driver.close)
             yield driver, EventEmitter(run_id, on_event=self.on_event, sender=sender)
+
+    def _login_handler(
+        self, driver: Driver, emitter: EventEmitter, scope: Scope, output_path: Path
+    ) -> LoginHandler | None:
+        """The login handler for this run, or ``None`` when auto-login is off."""
+        if not self.auto_login:
+            return None
+        return LoginHandler(
+            driver,
+            self.credentials or Credentials.from_env(),
+            in_scope=scope.allows,
+            on_login_failed=lambda url, reason, ref: self._emit_login_failed(
+                emitter, url, reason, ref
+            ),
+            screenshots_dir=output_path / "screenshots",
+        )
+
+    @staticmethod
+    def _emit_login_failed(
+        emitter: EventEmitter, url: str, reason: str, screenshot_ref: str | None
+    ) -> None:
+        emitter.emit(LOGIN_FAILED, url=url, reason=reason, screenshot_ref=screenshot_ref)
 
     @staticmethod
     def _emit_discovered(emitter: EventEmitter, page: ManifestPage) -> None:
@@ -205,6 +244,8 @@ class Crawler(_Runner):
         webhook_secret: str | None = None,
         driver: Driver | None = None,
         headless: bool = True,
+        credentials: Credentials | None = None,
+        auto_login: bool = True,
     ) -> None:
         super().__init__(
             config,
@@ -214,6 +255,8 @@ class Crawler(_Runner):
             webhook_secret=webhook_secret,
             driver=driver,
             headless=headless,
+            credentials=credentials,
+            auto_login=auto_login,
         )
         self.run_id = run_id
 
@@ -233,7 +276,16 @@ class Crawler(_Runner):
         self.run_id = run_id
 
         with self._session(run_id) as (driver, emitter):
-            if existing is not None and existing.discovery_status in (COMPLETE, MAX_PAGES_REACHED):
+            scope = Scope(
+                config.discovery.domain_scope, [normalize_url(u) for u in config.start_urls]
+            )
+            login = self._login_handler(driver, emitter, scope, out)
+            reusable = (
+                existing is not None
+                and existing.discovery_status in (COMPLETE, MAX_PAGES_REACHED)
+                and not existing.blocked_on_auth  # what is behind the login was never discovered
+            )
+            if reusable and existing is not None:
                 logger.info(
                     "resuming run; discovery already finished",
                     run_id=run_id,
@@ -242,10 +294,13 @@ class Crawler(_Runner):
                 )
                 manifest = existing
             else:
+                if existing is not None and existing.blocked_on_auth:
+                    logger.info("the previous attempt was blocked on auth; discovering again")
                 manifest = DiscoveryCrawler(
                     driver,
                     config.discovery,
                     on_page_discovered=lambda page: self._emit_discovered(emitter, page),
+                    authenticator=login,
                 ).discover(config.start_urls, run_id=run_id, manifest_path=manifest_path)
 
             if extract:
@@ -253,6 +308,7 @@ class Crawler(_Runner):
                     driver,
                     config.extraction,
                     on_page_extracted=lambda page: self._emit_extracted(emitter, page),
+                    authenticator=login,
                 ).extract(manifest, manifest_path=manifest_path)
 
             self._emit_complete(emitter, manifest, manifest_path)
@@ -293,6 +349,8 @@ class Extractor(_Runner):
         webhook_secret: str | None = None,
         driver: Driver | None = None,
         headless: bool = True,
+        credentials: Credentials | None = None,
+        auto_login: bool = True,
     ) -> None:
         super().__init__(
             config,
@@ -302,6 +360,8 @@ class Extractor(_Runner):
             webhook_secret=webhook_secret,
             driver=driver,
             headless=headless,
+            credentials=credentials,
+            auto_login=auto_login,
         )
         self._explicit_config = config is not None
 
@@ -317,10 +377,15 @@ class Extractor(_Runner):
                 extraction = replace(extraction, output_path=str(manifest_path.parent))
 
         with self._session(loaded.run_id) as (driver, emitter):
+            # With no start URLs on record (a hand-built manifest), the pages define the scope.
+            origins = loaded.start_urls or [p.url for p in loaded.pages]
+            scope = Scope(self.config.discovery.domain_scope, [normalize_url(u) for u in origins])
+            login = self._login_handler(driver, emitter, scope, Path(extraction.output_path))
             result = ElementExtractor(
                 driver,
                 extraction,
                 on_page_extracted=lambda page: self._emit_extracted(emitter, page),
+                authenticator=login,
             ).extract(loaded, manifest_path=manifest_path)
             self._emit_complete(emitter, result, manifest_path)
         return Run(result.run_id, result, manifest_path, Path(extraction.output_path))

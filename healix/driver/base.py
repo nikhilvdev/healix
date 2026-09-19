@@ -114,6 +114,13 @@ class Driver(ABC):
     @abstractmethod
     def navigate(self, url: str) -> None: ...
 
+    def settle(self) -> None:  # noqa: B027 - optional hook, not abstract
+        """Wait, best-effort and bounded, for in-flight navigation and network activity to quiet.
+
+        Call it after an action that may navigate (a click, a form submit) before reading the
+        page. Drivers with nothing to wait for leave the default no-op.
+        """
+
     @abstractmethod
     def find(self, fingerprint: Fingerprint) -> Element:
         """Resolve ``fingerprint`` via its primary locators.

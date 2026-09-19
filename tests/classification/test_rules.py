@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from healix.classification import PAGE_TYPES, UNKNOWN, classify, classify_page
-from healix.classification.rules import PRIORITY, RULES, _page_direction, _parent_selectors
+from healix.classification.rules import (
+    PRIORITY,
+    RULES,
+    _page_direction,
+    _parent_selectors,
+    is_oauth_url,
+)
 from healix.driver.base import Element
 
 _ids = itertools.count(1)
@@ -335,3 +341,48 @@ def test_a_lone_next_link_is_pagination_but_a_lone_next_button_is_not():
     button = classify_page([*rows, el("button", text="Next")])
     assert "pagination" in link.signals["list"]
     assert "pagination" not in button.signals.get("list", [])
+
+
+def test_an_sso_only_sign_in_page_is_a_login_when_a_heading_says_so():
+    page = [el("h1", text="Sign in"), el("button", text="Sign in with SSO")]
+    assert classify(page, "https://app.example.com/welcome") == "login"
+
+
+def test_an_sso_only_page_at_a_login_url_is_a_login():
+    assert (
+        classify([el("button", text="Continue with Okta")], "https://app.example.com/login")
+        == "login"
+    )
+
+
+def test_an_sso_button_alone_does_not_make_a_login_page():
+    page = [
+        el("h1", text="Latest news"),
+        el("p", text="A story"),
+        el("button", text="Continue with Google"),
+    ]
+    assert classify(page, "https://news.example.com/") != "login"
+
+
+def test_the_sso_buttons_own_sign_in_wording_is_not_a_sign_in_cue():
+    # a homepage with a "Sign in with Google" button is not, by that alone, a login page
+    page = [el("h1", text="Welcome"), el("button", text="Sign in with Google")]
+    assert classify(page, "https://app.example.com/") != "login"
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://idp.example.net/oauth/authorize", True),
+        ("https://tenant.okta.com/app/x", True),
+        ("https://login.microsoftonline.com/common/x", True),
+        ("https://accounts.google.com/o/x", True),
+        ("https://app.example.com/saml/acs", True),
+        ("https://app.example.com/sso/start", True),
+        ("https://evil.example.org/login?client_id=abc&response_type=code&redirect_uri=x", False),
+        ("https://evil.example.org/login", False),
+        ("https://app.example.com/products", False),
+    ],
+)
+def test_is_oauth_url_trusts_host_and_path_never_the_query_string(url, expected):
+    assert is_oauth_url(url) is expected

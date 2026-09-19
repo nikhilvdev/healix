@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from healix.classification import classify
+from healix.auth import BLOCKED, FAILED, SKIPPED, Authenticator, LoginResult
+from healix.classification import classify, is_oauth_url
+from healix.classification.rules import LOGIN
 from healix.discovery import manifest as m
 from healix.discovery.manifest import (
     Manifest,
@@ -127,6 +129,11 @@ class DiscoveryCrawler:
     and URL; it defaults to the rule-based ``healix.classification.classify``. Pass
     ``None`` to skip classification (every page is then ``"unknown"``).
     ``on_page_discovered`` is called with each new manifest page as it is recorded.
+
+    With an ``authenticator`` (a ``LoginHandler``), landing on a login page logs in and the
+    crawl continues past it; a page that redirected to a login page is loaded again once the
+    session exists. A run that meets a login page with no credentials is flagged
+    ``blocked_on_auth`` on the manifest, and the pages behind the login are recorded as failed.
     """
 
     def __init__(
@@ -136,11 +143,13 @@ class DiscoveryCrawler:
         *,
         classifier: Classifier | None = classify,
         on_page_discovered: Callable[[ManifestPage], None] | None = None,
+        authenticator: Authenticator | None = None,
     ) -> None:
         self.driver = driver
         self.config = config or DiscoveryConfig()
         self.classifier = classifier
         self.on_page_discovered = on_page_discovered
+        self.authenticator = authenticator
 
     def discover(
         self,
@@ -159,7 +168,7 @@ class DiscoveryCrawler:
             raise ValueError("at least one start URL is required")
         config = self.config
         starts = [normalize_url(u) for u in start_urls]
-        scope = _Scope(config.domain_scope, starts)
+        scope = Scope(config.domain_scope, starts)
         manifest = Manifest(run_id=run_id or uuid.uuid4().hex[:12], start_urls=list(start_urls))
 
         logger.info(
@@ -216,8 +225,35 @@ class DiscoveryCrawler:
             )
         return manifest
 
-    def _visit(self, url: str, manifest: Manifest, scope: _Scope, visited: set[str]) -> list[str]:
+    # -- visiting a page ------------------------------------------------------------ #
+
+    def _visit(self, url: str, manifest: Manifest, scope: Scope, visited: set[str]) -> list[str]:
         """Load ``url``, record it, and return the in-scope links found on it."""
+        final = self._load(url, manifest)
+        visited.add(url)
+        if final is None:
+            return []
+        if final in visited and final != url:
+            logger.debug("redirected to an already-visited page", url=url, final_url=final)
+            return []
+        visited.add(final)
+        if not scope.allows(final):
+            if self.authenticator is not None and is_oauth_url(final):
+                return self._through_identity_provider(url, final, manifest, scope)
+            logger.info("redirected out of scope; skipping", url=url, final_url=final)
+            return []
+
+        elements = self._read(final, manifest)
+        if elements is None:
+            return []
+        page_type = self._classify(elements, final)
+        links = self._record(final, elements, page_type, manifest, scope)
+        if self.authenticator is not None:
+            links += self._authenticate(url, final, elements, page_type, manifest, scope)
+        return links
+
+    def _load(self, url: str, manifest: Manifest) -> str | None:
+        """Navigate to ``url``; its final normalized URL, or ``None`` if it could not load."""
         try:
             self.driver.navigate(url)
         except Exception as exc:
@@ -225,32 +261,35 @@ class DiscoveryCrawler:
                 "could not load page", url=url, error=str(exc), error_type=type(exc).__name__
             )
             manifest.add_failed(url, str(exc))
-            visited.add(url)
-            return []
+            return None
+        return _safe_normalize(self.driver.current_url) or url
 
-        final = _safe_normalize(self.driver.current_url) or url
-        visited.add(url)
-        if final in visited and final != url:
-            logger.debug("redirected to an already-visited page", url=url, final_url=final)
-            return []
-        visited.add(final)
-        if not scope.allows(final):
-            logger.info("redirected out of scope; skipping", url=url, final_url=final)
-            return []
-
+    def _read(self, url: str, manifest: Manifest) -> list[Element] | None:
         try:
-            elements = self.driver.get_elements()
+            return self.driver.get_elements()
         except Exception as exc:
             logger.warn(
                 "could not extract elements",
-                url=final,
+                url=url,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
-            manifest.add_failed(final, str(exc))
-            return []
+            manifest.add_failed(url, str(exc))
+            return None
+
+    def _classify(self, elements: list[Element], url: str) -> str:
+        return self.classifier(elements, url) if self.classifier else m.UNKNOWN_PAGE_TYPE
+
+    def _record(
+        self,
+        final: str,
+        elements: list[Element],
+        page_type: str,
+        manifest: Manifest,
+        scope: Scope,
+    ) -> list[str]:
+        """Add the page to the manifest and return the in-scope links found on it."""
         page_hash = structural_hash(elements)
-        page_type = self.classifier(elements, final) if self.classifier else m.UNKNOWN_PAGE_TYPE
         page, is_new = manifest.add_page(
             final,
             page_hash,
@@ -270,8 +309,82 @@ class DiscoveryCrawler:
         # a repeated template can still link somewhere new.
         return [link for link in _links(elements) if scope.allows(link)]
 
+    # -- logging in ------------------------------------------------------------------- #
 
-class _Scope:
+    def _authenticate(
+        self,
+        url: str,
+        final: str,
+        elements: list[Element],
+        page_type: str,
+        manifest: Manifest,
+        scope: Scope,
+    ) -> list[str]:
+        """Log in if this page needs it; the extra URLs the crawl should now visit."""
+        assert self.authenticator is not None
+        result = self.authenticator.handle_page(url, final, elements, page_type)
+        if self.authenticator.blocked:
+            manifest.blocked_on_auth = True
+        return self._after_login(result, url, final, manifest, scope)
+
+    def _through_identity_provider(
+        self, url: str, final: str, manifest: Manifest, scope: Scope
+    ) -> list[str]:
+        """``url`` redirected to an out-of-scope SSO page: it may be the login we need."""
+        assert self.authenticator is not None
+        try:
+            elements = self.driver.get_elements()
+        except Exception as exc:
+            logger.debug("could not read the identity provider page", error_type=type(exc).__name__)
+            return []
+        page_type = self._classify(elements, final)
+        if page_type != LOGIN:
+            logger.info("redirected out of scope; skipping", url=url, final_url=final)
+            return []
+        return self._authenticate(url, final, elements, page_type, manifest, scope)
+
+    def _after_login(
+        self, result: LoginResult, url: str, final: str, manifest: Manifest, scope: Scope
+    ) -> list[str]:
+        bounced = final != url
+        if result.status in (BLOCKED, FAILED, SKIPPED):
+            if bounced:
+                why = (
+                    "no credentials are set"
+                    if result.status == BLOCKED
+                    else "the login did not succeed"
+                )
+                manifest.add_failed(url, f"requires authentication, and {why}")
+            return []
+        if not result.authenticated:
+            return []
+
+        extra: list[str] = []
+        landing = _safe_normalize(result.landing_url) if result.landing_url else None
+        if landing and scope.allows(landing):
+            extra.append(landing)  # wherever the login ended up is a page to visit
+        if bounced:
+            extra += self._revisit(url, manifest, scope)  # the page we originally wanted
+        return extra
+
+    def _revisit(self, url: str, manifest: Manifest, scope: Scope) -> list[str]:
+        """Load ``url`` again now that the session exists."""
+        assert self.authenticator is not None
+        final = self._load(url, manifest)
+        if final is None or not scope.allows(final):
+            return []
+        elements = self._read(final, manifest)
+        if elements is None:
+            return []
+        page_type = self._classify(elements, final)
+        if page_type == LOGIN and final != url:
+            self.authenticator.report_session_invalid(final)
+            manifest.add_failed(url, "requires authentication, and the session did not persist")
+            return []
+        return self._record(final, elements, page_type, manifest, scope)
+
+
+class Scope:
     """Which URLs discovery may visit, derived from the start URLs."""
 
     def __init__(self, domain_scope: str, start_urls: list[str]) -> None:

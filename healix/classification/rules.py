@@ -63,6 +63,12 @@ _OAUTH_URL = re.compile(
     r"/oauth2?/|/authorize|/saml|/sso|/openid|/adfs/|login\.microsoftonline\.com|"
     r"accounts\.google\.com|okta\.com|auth0\.com|[?&](response_type|client_id|redirect_uri)="
 )
+# Where an identity provider lives, judged by host and path only. Query strings are excluded on
+# purpose: anyone can append ``?client_id=`` to any URL, so it must not establish trust.
+_SSO_ENDPOINT = re.compile(
+    r"/oauth2?/|/authorize|/saml|/sso|/openid|/adfs/|login\.microsoftonline\.com|"
+    r"accounts\.google\.com|okta\.com|auth0\.com"
+)
 _SSO_BUTTON = re.compile(
     r"(sign|log) ?in with|continue with|single sign-?on|\bsso\b|"
     r"use (your )?(google|microsoft|okta|github|apple)"
@@ -436,7 +442,18 @@ def _login(f: _Features) -> _Score:
         ),
     )
     b.add("few_fields", 0.15, len(f.fields) <= 3)
-    return a if a.total >= b.total else b
+
+    # Route C: an app's own sign-in page that offers only SSO. The button alone is not enough
+    # ("Continue with Google" is everywhere), so it takes a sign-in cue from the URL or a
+    # heading — never from the button's own text.
+    c = _Score()
+    has_sso = any(
+        _SSO_BUTTON.search(n.text) or _SSO_BUTTON.search(n.blob) for n in (*f.buttons, *f.links)
+    )
+    heading_cue = any(_LOGIN_TEXT.search(n.text) for n in f.headings)
+    c.add("sso_with_signin_cue", 0.85, has_sso and (bool(_LOGIN_URL.search(f.path)) or heading_cue))
+    c.add("few_fields", 0.15, len(f.fields) <= 3)
+    return max((a, b, c), key=lambda score: score.total)
 
 
 def _dashboard(f: _Features) -> _Score:
@@ -661,6 +678,17 @@ RULES: dict[str, Callable[[_Features], _Score]] = {
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
+
+
+def is_oauth_url(url: str) -> bool:
+    """Whether ``url`` looks like an OAuth/SSO/identity-provider endpoint.
+
+    Judged by host and path only — query parameters (``?client_id=…``) are ignored, since they
+    are trivially forged. This is a guard against *accidentally* treating an unrelated page as
+    a login, not a defence against a hostile site: an app chooses its own identity provider.
+    """
+    parts = urlsplit(url.lower())
+    return bool(_SSO_ENDPOINT.search(f"{parts.netloc}{parts.path}"))
 
 
 def classify_page(elements: Sequence[Element], url: str = "") -> Classification:

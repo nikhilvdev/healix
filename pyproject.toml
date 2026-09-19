@@ -103,6 +103,8 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # The in-page collector is JavaScript inside a Python string; wrapping it hurts readability.
 "healix/driver/frames.py" = ["E501"]
+# The login test site is HTML written as Python strings.
+"tests/loginsite.py" = ["E501"]
 
 [tool.mypy]
 strict = true

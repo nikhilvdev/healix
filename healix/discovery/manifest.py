@@ -194,6 +194,8 @@ class Manifest:
     start_urls: list[str] = field(default_factory=list)
     discovery_status: str = IN_PROGRESS
     platform_detected: str | None = None
+    # A login page was reached but no credentials were set: pages behind it were not reachable.
+    blocked_on_auth: bool = False
     pages: list[ManifestPage] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -298,6 +300,7 @@ class Manifest:
             "pages_discovered": self.pages_discovered,
             "pages_extracted": self.pages_extracted,
             "platform_detected": self.platform_detected,
+            "blocked_on_auth": self.blocked_on_auth,
             "pages": [p.to_dict() for p in self.pages],
         }
 
@@ -308,6 +311,7 @@ class Manifest:
             start_urls=list(raw.get("start_urls") or []),
             discovery_status=raw.get("discovery_status", COMPLETE),
             platform_detected=raw.get("platform_detected"),
+            blocked_on_auth=bool(raw.get("blocked_on_auth", False)),
             pages=[ManifestPage.from_dict(p) for p in raw.get("pages") or []],
         )
 

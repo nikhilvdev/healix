@@ -6,6 +6,14 @@ from healix.classification.rules import (
     Classification,
     classify,
     classify_page,
+    is_oauth_url,
 )
 
-__all__ = ["PAGE_TYPES", "UNKNOWN", "Classification", "classify", "classify_page"]
+__all__ = [
+    "PAGE_TYPES",
+    "UNKNOWN",
+    "Classification",
+    "classify",
+    "classify_page",
+    "is_oauth_url",
+]

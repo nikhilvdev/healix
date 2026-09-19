@@ -81,18 +81,22 @@ class PlaywrightDriverAdapter(Driver):
 
     def navigate(self, url: str) -> None:
         self.page.goto(url, wait_until="load")
-        # Client-rendered pages keep fetching after `load`; give them a bounded chance to settle.
-        # Busy pages (polling, websockets) never go idle, so a timeout here is expected.
+        self.settle()
+
+    def settle(self) -> None:
+        # A navigation in flight must finish before the page can be read.
+        try:
+            self.page.wait_for_load_state("load", timeout=max(self._settle_timeout_ms, 1000))
+        except PlaywrightError:
+            logger.debug("page did not finish loading while settling")
+        # Client-rendered pages keep fetching after `load`; give them a bounded chance to go
+        # idle. Busy pages (polling, websockets) never do, so a timeout here is expected.
         # (Playwright treats timeout=0 as "wait forever", so 0 here means "don't wait".)
         if self._settle_timeout_ms > 0:
             try:
                 self.page.wait_for_load_state("networkidle", timeout=self._settle_timeout_ms)
             except PlaywrightError:
-                logger.debug(
-                    "network did not go idle after load",
-                    url=url,
-                    timeout_ms=self._settle_timeout_ms,
-                )
+                logger.debug("network did not go idle", timeout_ms=self._settle_timeout_ms)
 
     def get_frames(self) -> list[Frame]:
         return walk_frames(

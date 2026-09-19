@@ -10,8 +10,13 @@
 run started here emits exactly the events an SDK run does.
 
 Exit status: ``0`` success; ``1`` runtime error; ``2`` usage or configuration error;
-``3`` the run finished but some pages failed; ``130`` interrupted (progress is saved, and
-the run can be resumed with ``--run-id``).
+``3`` the run finished but some pages failed; ``4`` blocked on authentication (a login page
+was reached but no credentials are set); ``130`` interrupted (progress is saved, and the run
+can be resumed with ``--run-id``).
+
+Logging in is automatic: a page that classifies as ``login`` is filled with
+``WEBLIB_LOGIN_USERNAME`` / ``WEBLIB_LOGIN_PASSWORD`` (from the environment or a ``.env`` in the
+current directory). ``--no-login`` turns that off.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from healix import __version__
+from healix.auth import PASSWORD_ENV, USERNAME_ENV
 from healix.config import ConfigError, RunConfig
 from healix.driver.factory import BackendUnavailableError
 from healix.log import configure_logging
@@ -35,6 +41,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_PARTIAL = 3
+EXIT_BLOCKED = 4
 EXIT_INTERRUPTED = 130
 
 LOG_LEVELS = ("trace", "debug", "info", "warn", "error", "fatal")
@@ -53,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
             "--webhook-url", help="POST every event to this URL (see HEALIX_WEBHOOK_SECRET)"
         )
         p.add_argument("--headed", action="store_true", help="show the browser window")
+        p.add_argument(
+            "--no-login", action="store_true", help="do not log in when a login page is reached"
+        )
         p.add_argument("--json", action="store_true", help="print the run summary as JSON")
         p.add_argument(
             "--log-level", choices=LOG_LEVELS, help="log level on stderr (default: warn)"
@@ -95,11 +105,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 webhook_url=args.webhook_url,
                 headless=not args.headed,
+                auto_login=not args.no_login,
             )
             run = runner.discover() if args.discover_only else runner.discover_and_extract()
         else:
             config_arg = RunConfig.load(args.config, require_start=False) if args.config else None
-            runner = Extractor(config_arg, webhook_url=args.webhook_url, headless=not args.headed)
+            runner = Extractor(
+                config_arg,
+                webhook_url=args.webhook_url,
+                headless=not args.headed,
+                auto_login=not args.no_login,
+            )
             run = runner.extract(args.manifest)
     except KeyboardInterrupt:
         run_id = getattr(runner, "run_id", None)
@@ -117,6 +133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
 
     _report(run, as_json=args.json)
+    if run.blocked_on_auth:
+        return EXIT_BLOCKED
     return EXIT_PARTIAL if run.pages_failed else EXIT_OK
 
 
@@ -128,7 +146,12 @@ def _report(run: Run, *, as_json: bool) -> None:
         f"run {run.run_id}: {run.pages_extracted} of {run.pages_discovered} pages extracted "
         f"(discovery {run.discovery_status})"
     )
-    if run.pages_failed:
+    if run.blocked_on_auth:
+        print(
+            f"  blocked on authentication: set {USERNAME_ENV} and {PASSWORD_ENV} (in the "
+            f"environment or a .env file), then re-run with --run-id {run.run_id}"
+        )
+    elif run.pages_failed:
         print(
             f"  {run.pages_failed} page(s) failed; re-run with --run-id {run.run_id} to retry them"
         )

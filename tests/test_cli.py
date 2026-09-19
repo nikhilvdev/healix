@@ -99,7 +99,7 @@ def test_missing_or_bad_arguments_exit_with_usage_error(argv, capsys):
 def test_crawl_passes_every_option_to_the_sdk(config_file):
     code = cli.main(
         ["crawl", "--config", str(config_file), "--output", "elsewhere", "--run-id", "r9",
-         "--webhook-url", "https://hooks.example/x", "--headed"]
+         "--webhook-url", "https://hooks.example/x", "--headed", "--no-login"]
     )  # fmt: skip
     [crawler] = FakeCrawler.instances
     assert code == 0 and crawler.calls == ["discover_and_extract"]
@@ -107,6 +107,7 @@ def test_crawl_passes_every_option_to_the_sdk(config_file):
         "run_id": "r9",
         "webhook_url": "https://hooks.example/x",
         "headless": False,
+        "auto_login": False,
     }
     assert crawler.config.extraction.output_path == "elsewhere"  # --output overrides the config
 
@@ -114,7 +115,12 @@ def test_crawl_passes_every_option_to_the_sdk(config_file):
 def test_crawl_defaults_are_headless_and_use_the_configured_output(config_file):
     cli.main(["crawl", "--config", str(config_file)])
     [crawler] = FakeCrawler.instances
-    assert crawler.kwargs == {"run_id": None, "webhook_url": None, "headless": True}
+    assert crawler.kwargs == {
+        "run_id": None,
+        "webhook_url": None,
+        "headless": True,
+        "auto_login": True,
+    }
     assert crawler.config.extraction.output_path == "OUT"
 
 
@@ -178,6 +184,7 @@ def test_json_output_is_one_parseable_line(config_file, capsys):
         "pages_extracted": 2,
         "pages_failed": 0,
         "platform_detected": None,
+        "blocked_on_auth": False,
         "manifest_path": "output/manifest.json",
     }
 
@@ -248,3 +255,34 @@ def test_python_dash_m_healix_runs_the_cli():
         [sys.executable, "-m", "healix", "--version"], capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0 and result.stdout.strip() == f"healix {__version__}"
+
+
+def test_a_run_blocked_on_auth_exits_four_and_says_which_variables_to_set(config_file, capsys):
+    run = make_run()
+    run.manifest.blocked_on_auth = True
+    FakeCrawler.run = run
+    assert cli.main(["crawl", "--config", str(config_file)]) == 4
+    out = capsys.readouterr().out
+    assert "blocked on authentication" in out
+    assert "WEBLIB_LOGIN_USERNAME" in out and "WEBLIB_LOGIN_PASSWORD" in out
+    assert "--run-id run-7" in out
+
+
+def test_blocked_takes_precedence_over_failed_pages(config_file):
+    run = make_run(failed=1)
+    run.manifest.blocked_on_auth = True
+    FakeCrawler.run = run
+    assert cli.main(["crawl", "--config", str(config_file)]) == 4
+
+
+def test_the_blocked_flag_is_in_the_json_summary(config_file, capsys):
+    run = make_run()
+    run.manifest.blocked_on_auth = True
+    FakeCrawler.run = run
+    cli.main(["crawl", "--config", str(config_file), "--json"])
+    assert json.loads(capsys.readouterr().out)["blocked_on_auth"] is True
+
+
+def test_extract_also_honours_no_login(config_file):
+    cli.main(["extract", "--manifest", "m.json", "--no-login"])
+    assert FakeCrawler.instances[0].kwargs["auto_login"] is False

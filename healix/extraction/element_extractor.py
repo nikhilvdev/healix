@@ -41,8 +41,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from healix.auth import BLOCKED, FAILED, SKIPPED, Authenticator
 from healix.classification import classify
-from healix.discovery.manifest import EXTRACTED, Manifest, ManifestPage, structural_hash
+from healix.classification.rules import LOGIN
+from healix.discovery.manifest import (
+    EXTRACTED,
+    Manifest,
+    ManifestPage,
+    normalize_url,
+    structural_hash,
+)
 from healix.driver.base import Driver, Element
 from healix.fs import write_json_atomic
 from healix.log import get_logger
@@ -174,6 +182,12 @@ class ElementExtractor:
     it defaults to ``healix.classification.classify`` (``None`` keeps the
     provisional type). ``on_page_extracted`` receives an ``ExtractedPage`` after
     each page is written and recorded.
+
+    With an ``authenticator`` (a ``LoginHandler``) a page that redirects to a login page —
+    a session that expired mid-run — triggers a login and is then loaded again; the run
+    continues from where it stopped. If that cannot be done the page is marked ``failed``
+    (and the manifest ``blocked_on_auth`` when no credentials are set). Login detection
+    relies on the classifier, so it needs ``classifier`` to be set.
     """
 
     def __init__(
@@ -184,12 +198,14 @@ class ElementExtractor:
         classifier: Classifier | None = classify,
         on_page_extracted: Callable[[ExtractedPage], None] | None = None,
         clock: Callable[[], datetime] = utc_now,
+        authenticator: Authenticator | None = None,
     ) -> None:
         self.driver = driver
         self.config = config or ExtractionConfig()
         self.classifier = classifier
         self.on_page_extracted = on_page_extracted
         self.clock = clock
+        self.authenticator = authenticator
 
     def extract(
         self,
@@ -249,26 +265,41 @@ class ElementExtractor:
             pending.append((index, page))
         return pending
 
+    def _load(self, page: ManifestPage) -> tuple[list[Element], str]:
+        """Navigate to the page; its elements and the URL it ended up at."""
+        self.driver.navigate(page.url)
+        final_url = self.driver.current_url
+        elements = self.driver.get_elements(iframe_traversal=self.config.iframe_traversal)
+        return elements, final_url
+
+    def _fail(self, manifest: Manifest, page: ManifestPage, exc: Exception) -> None:
+        logger.warn(
+            "could not extract page",
+            url=page.url,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        manifest.mark_failed(page.url, str(exc))
+
     def _extract_page(
         self, manifest: Manifest, page: ManifestPage, index: int, out_dir: Path
     ) -> bool:
         """Extract one page; ``False`` if it failed (and was marked so)."""
         try:
-            self.driver.navigate(page.url)
-            final_url = self.driver.current_url
-            elements = self.driver.get_elements(iframe_traversal=self.config.iframe_traversal)
+            elements, final_url = self._load(page)
         except Exception as exc:
-            logger.warn(
-                "could not extract page",
-                url=page.url,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            manifest.mark_failed(page.url, str(exc))
+            self._fail(manifest, page, exc)
             return False
 
+        if self.authenticator is not None:
+            page_type = self._classify(elements, final_url, page)
+            outcome = self._authenticate(manifest, page, elements, final_url, page_type)
+            if outcome is None:
+                return False
+            elements, final_url = outcome
+
         previous_type = page.page_type
-        page_type = self.classifier(elements, final_url) if self.classifier else previous_type
+        page_type = self._classify(elements, final_url, page)
         document = build_page_document(
             run_id=manifest.run_id,
             url=page.url,
@@ -315,3 +346,58 @@ class ElementExtractor:
                 )
             )
         return True
+
+    def _classify(self, elements: list[Element], final_url: str, page: ManifestPage) -> str:
+        return self.classifier(elements, final_url) if self.classifier else page.page_type
+
+    def _authenticate(
+        self,
+        manifest: Manifest,
+        page: ManifestPage,
+        elements: list[Element],
+        final_url: str,
+        page_type: str,
+    ) -> tuple[list[Element], str] | None:
+        """Log in if this page needs it. The (elements, URL) to extract, or ``None`` if the
+        page could not be reached and was marked failed."""
+        assert self.authenticator is not None
+        result = self.authenticator.handle_page(page.url, final_url, elements, page_type)
+        if self.authenticator.blocked:
+            manifest.blocked_on_auth = True
+        bounced = not _same_url(page.url, final_url)
+
+        if result.status in (BLOCKED, FAILED, SKIPPED):
+            if bounced:
+                why = (
+                    "no credentials are set"
+                    if result.status == BLOCKED
+                    else "the login did not succeed"
+                )
+                manifest.mark_failed(page.url, f"requires authentication, and {why}")
+                return None
+            return elements, final_url  # the login page itself: extract it as it is
+        if not result.authenticated or not bounced:
+            return elements, final_url  # extract the login page as it was before logging in
+
+        # We were sent to a login page and have now logged in: load the page we wanted.
+        try:
+            elements, final_url = self._load(page)
+        except Exception as exc:
+            self._fail(manifest, page, exc)
+            return None
+        if self._classify(elements, final_url, page) == LOGIN and not _same_url(
+            page.url, final_url
+        ):
+            self.authenticator.report_session_invalid(final_url)
+            manifest.mark_failed(
+                page.url, "requires authentication, and the session did not persist"
+            )
+            return None
+        return elements, final_url
+
+
+def _same_url(a: str, b: str) -> bool:
+    try:
+        return normalize_url(a) == normalize_url(b)
+    except ValueError:
+        return a == b
