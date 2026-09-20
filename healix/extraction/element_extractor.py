@@ -22,7 +22,9 @@ A manifest entry's ``output_file`` is relative to ``output_path``.
 
 Page JSON keys: ``schema_version``, ``run_id``, ``url``, ``final_url`` (only when
 the page redirected), ``page_type``, ``structural_hash``, ``captured_at``,
-``element_counts`` and ``elements`` (each in the raw element schema).
+``element_counts`` and ``elements`` (each in the raw element schema). ``skipped_frames`` is
+present only when a frame's elements are missing from ``elements``: a list of ``path``, ``url``
+and ``reason`` (``cross_origin``, ``inside_cross_origin_frame`` or ``unreadable``).
 
 Output files contain page markup — attribute values, link URLs, hidden-input
 values — so treat them as sensitive. A password field's markup ``value`` is
@@ -51,7 +53,7 @@ from healix.discovery.manifest import (
     normalize_url,
     structural_hash,
 )
-from healix.driver.base import Driver, Element
+from healix.driver.base import Driver, Element, SkippedFrame
 from healix.fs import write_json_atomic
 from healix.healing.baseline import KEEP, MODES, record_page
 from healix.healing.store import FingerprintStore
@@ -79,6 +81,12 @@ class ExtractionConfig:
     (the platform adapters may add a ``platform_signal`` to elements, and the manifest records
     which platform was seen) or ``"off"`` (no platform signals; ``platform_detected`` stays
     ``null``). The generic pipeline runs either way.
+
+    ``settle_quiet_ms`` is how long a page must stay unchanged (no new resources or elements)
+    before it is read. ``None`` (default) keeps each backend's own behaviour: Selenium waits 500 ms,
+    Playwright waits for network idle only. Set it for client-rendered sites that render after
+    network idle; ``0`` turns the wait off. It applies to discovery as well as extraction, and is
+    bounded by the driver's settle timeout.
     """
 
     sequence: str = "one_by_one"
@@ -86,6 +94,7 @@ class ExtractionConfig:
     output_path: str = "./output/"
     iframe_traversal: bool = True
     platform_detection: str = "auto"
+    settle_quiet_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.sequence != "one_by_one":
@@ -96,6 +105,15 @@ class ExtractionConfig:
             raise ValueError(
                 f"platform_detection must be one of {PLATFORM_DETECTION_MODES}, "
                 f"got {self.platform_detection!r}"
+            )
+        if self.settle_quiet_ms is not None and (
+            isinstance(self.settle_quiet_ms, bool)
+            or not isinstance(self.settle_quiet_ms, int)
+            or self.settle_quiet_ms < 0
+        ):
+            raise ValueError(
+                "settle_quiet_ms must be a whole number of milliseconds (0 or more) or null, "
+                f"got {self.settle_quiet_ms!r}"
             )
 
     @classmethod
@@ -140,6 +158,7 @@ def build_page_document(
     page_type: str,
     elements: Sequence[Element],
     captured_at: str,
+    skipped_frames: Sequence[SkippedFrame] = (),
 ) -> dict[str, Any]:
     """The JSON document written for one page."""
     document: dict[str, Any] = {
@@ -158,6 +177,8 @@ def build_page_document(
             "elements": [e.to_dict() for e in elements],
         }
     )
+    if skipped_frames:
+        document["skipped_frames"] = [f.to_dict() for f in skipped_frames]
     return document
 
 
@@ -280,15 +301,17 @@ class ElementExtractor:
             pending.append((index, page))
         return pending
 
-    def _load(self, page: ManifestPage) -> tuple[list[Element], str]:
-        """Navigate to the page; its elements and the URL it ended up at."""
+    def _load(self, page: ManifestPage) -> tuple[list[Element], str, list[SkippedFrame]]:
+        """Navigate to the page; its elements, the URL it ended up at, and the frames it could
+        not read."""
         self.driver.navigate(page.url)
         final_url = self.driver.current_url
         elements = self.driver.get_elements(iframe_traversal=self.config.iframe_traversal)
+        skipped = self.driver.skipped_frames()
         if self.config.platform_detection == "off":
             for element in elements:
                 element.platform_signal = None  # whatever the driver was set up to add
-        return elements, final_url
+        return elements, final_url, skipped
 
     def _fail(self, manifest: Manifest, page: ManifestPage, exc: Exception) -> None:
         logger.warn(
@@ -304,17 +327,17 @@ class ElementExtractor:
     ) -> bool:
         """Extract one page; ``False`` if it failed (and was marked so)."""
         try:
-            elements, final_url = self._load(page)
+            elements, final_url, skipped = self._load(page)
         except Exception as exc:
             self._fail(manifest, page, exc)
             return False
 
         if self.authenticator is not None:
             page_type = self._classify(elements, final_url, page)
-            outcome = self._authenticate(manifest, page, elements, final_url, page_type)
+            outcome = self._authenticate(manifest, page, elements, final_url, page_type, skipped)
             if outcome is None:
                 return False
-            elements, final_url = outcome
+            elements, final_url, skipped = outcome
 
         previous_type = page.page_type
         page_type = self._classify(elements, final_url, page)
@@ -327,6 +350,7 @@ class ElementExtractor:
             page_type=page_type,
             elements=elements,
             captured_at=iso_utc(self.clock()),
+            skipped_frames=skipped,
         )
         if page.structural_hash and document["structural_hash"] != page.structural_hash:
             logger.info(
@@ -401,9 +425,10 @@ class ElementExtractor:
         elements: list[Element],
         final_url: str,
         page_type: str,
-    ) -> tuple[list[Element], str] | None:
-        """Log in if this page needs it. The (elements, URL) to extract, or ``None`` if the
-        page could not be reached and was marked failed."""
+        skipped: list[SkippedFrame],
+    ) -> tuple[list[Element], str, list[SkippedFrame]] | None:
+        """Log in if this page needs it. The (elements, URL, skipped frames) to extract, or
+        ``None`` if the page could not be reached and was marked failed."""
         assert self.authenticator is not None
         result = self.authenticator.handle_page(page.url, final_url, elements, page_type)
         if self.authenticator.blocked:
@@ -419,13 +444,13 @@ class ElementExtractor:
                 )
                 manifest.mark_failed(page.url, f"requires authentication, and {why}")
                 return None
-            return elements, final_url  # the login page itself: extract it as it is
+            return elements, final_url, skipped  # the login page itself: extract it as it is
         if not result.authenticated or not bounced:
-            return elements, final_url  # extract the login page as it was before logging in
+            return elements, final_url, skipped  # the login page as it was before logging in
 
         # We were sent to a login page and have now logged in: load the page we wanted.
         try:
-            elements, final_url = self._load(page)
+            elements, final_url, skipped = self._load(page)
         except Exception as exc:
             self._fail(manifest, page, exc)
             return None
@@ -437,7 +462,7 @@ class ElementExtractor:
                 page.url, "requires authentication, and the session did not persist"
             )
             return None
-        return elements, final_url
+        return elements, final_url, skipped
 
 
 def _same_url(a: str, b: str) -> bool:

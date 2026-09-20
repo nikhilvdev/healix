@@ -16,6 +16,11 @@ from healix.ids import normalize_id
 
 MAIN_FRAME = "main"
 
+# Why a frame's elements are not in a page's output. See ``SkippedFrame``.
+CROSS_ORIGIN = "cross_origin"
+INSIDE_CROSS_ORIGIN = "inside_cross_origin_frame"
+UNREADABLE = "unreadable"
+
 
 class ElementNotFoundError(LookupError):
     """No element (or frame) matched the requested fingerprint/path."""
@@ -85,6 +90,25 @@ class Frame:
     name: str | None = None
     same_origin: bool = True
     handle: Any = field(default=None, repr=False, compare=False)
+    skip_reason: str | None = None  # why its elements cannot be read; None when they can
+
+
+@dataclass(frozen=True)
+class SkippedFrame:
+    """A frame whose elements are missing from a page's output, and why.
+
+    ``reason`` is ``cross_origin`` (a different origin from the page; the browser does not let a
+    script read it), ``inside_cross_origin_frame`` (same origin as the page, but nested inside a
+    cross-origin frame, so it cannot be reached either) or ``unreadable`` (it could be reached
+    but reading it failed, for example because it navigated or was removed mid-read).
+    """
+
+    path: list[str]
+    url: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 Target = Element | Fingerprint
@@ -156,6 +180,14 @@ class Driver(ABC):
     @abstractmethod
     def get_frames(self) -> list[Frame]:
         """The frame tree, flattened depth-first, main frame first."""
+
+    def skipped_frames(self) -> list[SkippedFrame]:
+        """Frames the last ``get_elements`` call could not read, so their elements are missing.
+
+        Empty when everything was read, and when ``iframe_traversal`` was off (nothing was
+        skipped; frames were not asked for). Drivers that cannot say leave the default.
+        """
+        return []
 
     @abstractmethod
     def screenshot(self) -> bytes: ...

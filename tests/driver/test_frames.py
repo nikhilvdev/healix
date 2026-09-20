@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from healix.driver.base import Frame
+from healix.driver.base import CROSS_ORIGIN, INSIDE_CROSS_ORIGIN, UNREADABLE, Frame, SkippedFrame
 from healix.driver.frames import collect_elements, origin_of, walk_frames
 
 
@@ -78,3 +78,59 @@ def test_collect_elements_tags_iframe_path_and_skips_cross_origin_and_failures()
     elements = collect_elements(frames, run)
     assert [e.iframe_path for e in elements] == [["main"], ["main", "a"]]
     assert elements[0].id_normalized == "n-{n}"
+
+
+def test_a_skipped_frame_says_why():
+    tree = Node(
+        "http://a.com/",
+        children=[
+            Node("http://b.com/", "foreign", [Node("http://a.com/back", "nested")]),
+            Node("http://a.com/ok", "ok"),
+        ],
+    )
+    reasons = {f.path[-1]: f.skip_reason for f in _walk(tree)}
+    assert reasons == {
+        "main": None,
+        "foreign": CROSS_ORIGIN,
+        # same origin as the page, but only reachable through a frame the page cannot read
+        "nested": INSIDE_CROSS_ORIGIN,
+        "ok": None,
+    }
+
+
+def test_collect_elements_reports_every_frame_it_could_not_read_and_why():
+    frames = [
+        Frame(["main"], "u"),
+        Frame(["main", "foreign"], "http://b.com/", same_origin=False, skip_reason=CROSS_ORIGIN),
+        Frame(
+            ["main", "foreign", "back"],
+            "http://a.com/back",
+            same_origin=False,
+            skip_reason=INSIDE_CROSS_ORIGIN,
+        ),
+        Frame(["main", "broken"], "http://a.com/broken"),
+    ]
+
+    def run(frame):
+        if frame.path[-1] == "broken":
+            raise RuntimeError("frame detached")
+        return [{"tag": "div"}]
+
+    skipped: list[SkippedFrame] = []
+    elements = collect_elements(frames, run, skipped=skipped)
+    assert len(elements) == 1
+    assert [(f.path, f.reason) for f in skipped] == [
+        (["main", "foreign"], CROSS_ORIGIN),
+        (["main", "foreign", "back"], INSIDE_CROSS_ORIGIN),
+        (["main", "broken"], UNREADABLE),
+    ]
+    assert skipped[0].to_dict() == {
+        "path": ["main", "foreign"],
+        "url": "http://b.com/",
+        "reason": "cross_origin",
+    }
+
+
+def test_collect_elements_does_not_need_a_list_to_report_into():
+    frames = [Frame(["main", "x"], "u", same_origin=False, skip_reason=CROSS_ORIGIN)]
+    assert collect_elements(frames, lambda frame: []) == []

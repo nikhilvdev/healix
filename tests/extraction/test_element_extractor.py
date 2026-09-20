@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from healix.discovery.manifest import EXTRACTED, FAILED, PENDING, Manifest
-from healix.driver.base import Driver, Element
+from healix.driver.base import CROSS_ORIGIN, Driver, Element, SkippedFrame
 from healix.extraction import (
     ElementExtractor,
     ExtractionConfig,
@@ -59,6 +59,9 @@ class FakeDriver(Driver):
 
     def get_frames(self):
         return []
+
+    def skipped_frames(self):
+        return list(getattr(self, "skipped", []))
 
     def screenshot(self):
         return b""
@@ -355,13 +358,53 @@ def test_build_page_document_omits_final_url_when_not_redirected():
     assert "final_url" not in doc
 
 
+def test_build_page_document_lists_skipped_frames_only_when_there_are_some():
+    skipped = [SkippedFrame(["main", "ads"], "https://ads.example/x", CROSS_ORIGIN)]
+    doc = build_page_document(
+        run_id="r",
+        url="u",
+        final_url="u",
+        page_type="x",
+        elements=[],
+        captured_at="t",
+        skipped_frames=skipped,
+    )
+    assert doc["skipped_frames"] == [
+        {"path": ["main", "ads"], "url": "https://ads.example/x", "reason": "cross_origin"}
+    ]
+
+
+def test_a_page_with_skipped_frames_says_so_in_its_output_file(tmp_path):
+    driver = FakeDriver({"https://e.com/a": _els("a")})
+    driver.skipped = [SkippedFrame(["main", "ads"], "https://ads.example/x", CROSS_ORIGIN)]
+    manifest = make_manifest("a")
+    ElementExtractor(driver, ExtractionConfig(output_path=str(tmp_path))).extract(manifest)
+    doc = json.loads((tmp_path / manifest.pages[0].output_file).read_text())
+    assert doc["skipped_frames"][0]["path"] == ["main", "ads"]
+    assert doc["element_counts"]["total"] == 2  # the elements that were read are all still there
+
+
 @pytest.mark.parametrize(
     "bad",
-    [{"sequence": "parallel"}, {"output_format": "csv"}, {"platform_detection": "yes"}],
+    [
+        {"sequence": "parallel"},
+        {"output_format": "csv"},
+        {"platform_detection": "yes"},
+        {"settle_quiet_ms": -1},
+        {"settle_quiet_ms": "500"},
+        {"settle_quiet_ms": 1.5},
+        {"settle_quiet_ms": True},
+    ],
 )
 def test_config_validation(bad):
     with pytest.raises(ValueError):
         ExtractionConfig.from_dict(bad)
+
+
+def test_settle_quiet_ms_defaults_to_the_backends_own_behaviour():
+    assert ExtractionConfig().settle_quiet_ms is None
+    assert ExtractionConfig.from_dict({"settle_quiet_ms": 0}).settle_quiet_ms == 0
+    assert ExtractionConfig.from_dict({"settle_quiet_ms": 1500}).settle_quiet_ms == 1500
 
 
 def test_config_from_the_run_config_block():

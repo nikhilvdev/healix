@@ -129,3 +129,24 @@ def test_resume_does_not_touch_already_extracted_pages(driver, crawl_site_url, t
     second_pass = {p.url: _load(out, p)["captured_at"] for p in final.pages}
     assert final.pages_extracted == manifest.pages_discovered
     assert {u for u in first_pass if first_pass[u] != second_pass[u]} == {victim.url}
+
+
+def test_a_cross_origin_frame_is_named_in_the_output_instead_of_dropped(driver, site_url, tmp_path):
+    out = tmp_path / "output"
+    manifest = Manifest("it-skipped")
+    manifest.add_page(site_url + "/index.html", "h")
+    ElementExtractor(driver, ExtractionConfig(output_path=str(out))).extract(manifest)
+    doc = _load(out, manifest.pages[0])
+    assert [(f["path"], f["reason"]) for f in doc["skipped_frames"]] == [
+        (["main", "foreign"], "cross_origin")
+    ]
+    assert doc["skipped_frames"][0]["url"].endswith("/foreign.html")
+    assert not any(e["id"] == "foreign-btn" for e in doc["elements"])
+
+
+def test_a_page_with_nothing_skipped_has_no_skipped_frames_key(driver, crawl_site_url, tmp_path):
+    out = tmp_path / "output"
+    manifest = Manifest("it-none-skipped")
+    manifest.add_page(crawl_site_url + "/index.html", "h")
+    ElementExtractor(driver, ExtractionConfig(output_path=str(out))).extract(manifest)
+    assert "skipped_frames" not in _load(out, manifest.pages[0])

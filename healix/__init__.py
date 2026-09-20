@@ -1,6 +1,6 @@
 """Healix — crawl, classify, extract, and self-heal web automation."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from healix.auth import Credentials  # noqa: E402
 from healix.config import ConfigError, RunConfig  # noqa: E402

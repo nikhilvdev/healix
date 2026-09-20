@@ -30,7 +30,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 
-from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Target
+from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, SkippedFrame, Target
 from healix.driver.diagnose import BackendReport
 from healix.driver.frames import (
     CHILD_FRAMES_JS,
@@ -43,6 +43,7 @@ from healix.driver.frames import (
     collect_elements,
     walk_frames,
 )
+from healix.driver.settle import ACTIVITY_EXPRESSION, POLL_SECONDS, wait_until_quiet
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
 from healix.log import get_logger
@@ -99,12 +100,8 @@ def diagnose() -> BackendReport:
     return BackendReport("selenium", True, version("selenium"), browser=chrome)
 
 
-# How often to look at the page while waiting for it to settle.
-_POLL_SECONDS = 0.05
-_ACTIVITY_JS = (
-    "return document.readyState + '|' + performance.getEntriesByType('resource').length"
-    " + '|' + document.getElementsByTagName('*').length;"
-)
+DEFAULT_QUIET_MS = 500
+_ACTIVITY_JS = f"return {ACTIVITY_EXPRESSION};"
 # Chromedriver stamps this onto every <iframe> it switches into. It is not part of the page.
 _DRIVER_ATTRIBUTES = ("cd_frame_id_",)
 # The documents browsers show instead of a page they could not load.
@@ -161,7 +158,7 @@ class SeleniumDriverAdapter(Driver):
         browser: str = "chrome",
         headless: bool = True,
         settle_timeout_ms: int = 3000,
-        quiet_ms: int = 500,
+        quiet_ms: int = DEFAULT_QUIET_MS,
         action_timeout_ms: int = 5000,
         page_load_timeout_ms: int = 30000,
         window_size: tuple[int, int] = (1280, 720),
@@ -181,6 +178,7 @@ class SeleniumDriverAdapter(Driver):
         self._page_load_timeout = page_load_timeout_ms / 1000
         self._window_size = window_size
         self._owns_driver = False
+        self._skipped: list[SkippedFrame] = []
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -255,7 +253,7 @@ class SeleniumDriverAdapter(Driver):
         state = self._activity()
         deadline = time.monotonic() + max(self._settle_timeout, 1.0)
         while not state.startswith("complete|") and time.monotonic() < deadline:
-            time.sleep(_POLL_SECONDS)
+            time.sleep(POLL_SECONDS)
             state = self._activity()
         if not state.startswith("complete|"):
             logger.debug("page did not finish loading while settling")
@@ -264,16 +262,13 @@ class SeleniumDriverAdapter(Driver):
         # timeout: busy pages (polling, websockets) never go quiet.
         if self._settle_timeout <= 0:
             return
-        deadline = time.monotonic() + self._settle_timeout
-        last, since = state, time.monotonic()
-        while time.monotonic() < deadline:
-            time.sleep(_POLL_SECONDS)
-            state = self._activity()
-            if state != last:
-                last, since = state, time.monotonic()
-            elif time.monotonic() - since >= self._quiet:
-                return
-        logger.debug("page did not go quiet", timeout_ms=int(self._settle_timeout * 1000))
+        if not wait_until_quiet(
+            self._activity,
+            quiet_s=self._quiet,
+            deadline=time.monotonic() + self._settle_timeout,
+            initial=state,
+        ):
+            logger.debug("page did not go quiet", timeout_ms=int(self._settle_timeout * 1000))
 
     def _activity(self) -> str:
         try:
@@ -294,10 +289,15 @@ class SeleniumDriverAdapter(Driver):
         frames = self.get_frames()
         if not iframe_traversal:
             frames = frames[:1]  # the main frame is always first
+        self._skipped = []
         return collect_elements(
             frames,
             lambda frame: [_scrub(raw) for raw in self._in_frame(frame, self._collect_js)],
+            skipped=self._skipped,
         )
+
+    def skipped_frames(self) -> list[SkippedFrame]:
+        return list(self._skipped)
 
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)

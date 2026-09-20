@@ -6,6 +6,7 @@ This is one of the only modules allowed to import ``playwright``.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -13,9 +14,10 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame as PlaywrightFrame
 from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 
-from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Target
+from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, SkippedFrame, Target
 from healix.driver.diagnose import BackendReport
 from healix.driver.frames import build_collect_js, build_describe_js, collect_elements, walk_frames
+from healix.driver.settle import ACTIVITY_EXPRESSION, wait_until_quiet
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
 from healix.log import get_logger
@@ -24,6 +26,8 @@ from healix.platform_adapters import ADAPTERS, PlatformAdapter
 logger = get_logger(__name__)
 
 _NAVIGATION_ATTEMPTS = 3
+# Off: Playwright's own network-idle wait is enough for most sites. See ``quiet_ms``.
+DEFAULT_QUIET_MS = 0
 
 
 def diagnose() -> BackendReport:
@@ -66,6 +70,13 @@ class PlaywrightDriverAdapter(Driver):
 
     ``platform_adapters`` are the optional platform hooks (``healix.platform_adapters``); the
     default is all of them, ``()`` turns them off.
+
+    ``settle`` waits for ``load`` and then, bounded by ``settle_timeout_ms``, for network idle.
+    A page that renders from a timer or from a script it starts itself can pass network idle and
+    still be empty, so ``quiet_ms`` (default ``0``, off) adds a second wait: no new resources and
+    no new elements for that long. It is a heuristic, and a request still in flight is invisible
+    to it. It runs inside the same ``settle_timeout_ms`` budget, so raise that too when you raise
+    this.
     """
 
     def __init__(
@@ -75,6 +86,7 @@ class PlaywrightDriverAdapter(Driver):
         browser: str = "chromium",
         headless: bool = True,
         settle_timeout_ms: int = 3000,
+        quiet_ms: int = DEFAULT_QUIET_MS,
         platform_adapters: Sequence[PlatformAdapter] | None = None,
     ) -> None:
         adapters = ADAPTERS if platform_adapters is None else tuple(platform_adapters)
@@ -82,11 +94,13 @@ class PlaywrightDriverAdapter(Driver):
         self._describe_js = build_describe_js(adapters)
         self._page = page
         self._settle_timeout_ms = settle_timeout_ms
+        self._quiet_ms = quiet_ms
         self._browser_name = browser
         self._headless = headless
         self._playwright: Playwright | None = None
         self._browser: Any = None
         self._owns_browser = False
+        self._skipped: list[SkippedFrame] = []
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -152,10 +166,21 @@ class PlaywrightDriverAdapter(Driver):
         # idle. Busy pages (polling, websockets) never do, so a timeout here is expected.
         # (Playwright treats timeout=0 as "wait forever", so 0 here means "don't wait".)
         if self._settle_timeout_ms > 0:
+            deadline = time.monotonic() + self._settle_timeout_ms / 1000
             try:
                 self.page.wait_for_load_state("networkidle", timeout=self._settle_timeout_ms)
             except PlaywrightError:
                 logger.debug("network did not go idle", timeout_ms=self._settle_timeout_ms)
+            if self._quiet_ms > 0 and not wait_until_quiet(
+                self._activity, quiet_s=self._quiet_ms / 1000, deadline=deadline
+            ):
+                logger.debug("page did not go quiet", timeout_ms=self._settle_timeout_ms)
+
+    def _activity(self) -> str:
+        try:
+            return str(self.page.evaluate(ACTIVITY_EXPRESSION))
+        except PlaywrightError:  # mid-navigation
+            return ""
 
     def get_frames(self) -> list[Frame]:
         return walk_frames(
@@ -170,7 +195,15 @@ class PlaywrightDriverAdapter(Driver):
         frames = self.get_frames()
         if not iframe_traversal:
             frames = frames[:1]  # the main frame is always first
-        return collect_elements(frames, lambda frame: frame.handle.evaluate(self._collect_js))
+        self._skipped = []
+        return collect_elements(
+            frames,
+            lambda frame: frame.handle.evaluate(self._collect_js),
+            skipped=self._skipped,
+        )
+
+    def skipped_frames(self) -> list[SkippedFrame]:
+        return list(self._skipped)
 
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)

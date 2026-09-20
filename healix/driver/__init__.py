@@ -1,12 +1,13 @@
 """Driver abstraction. Adapters are imported lazily so backends stay optional."""
 
-from healix.driver.base import Driver, Element, ElementNotFoundError, Frame
+from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, SkippedFrame
 
 __all__ = [
     "Driver",
     "Element",
     "ElementNotFoundError",
     "Frame",
+    "SkippedFrame",
     "PlaywrightDriverAdapter",
     "SeleniumDriverAdapter",
 ]

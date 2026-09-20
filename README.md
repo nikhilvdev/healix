@@ -876,20 +876,22 @@ class Driver(ABC):
 Extraction, discovery, healing, classification, and generation never import `playwright`
 or `selenium`; they go through `Driver`. There are two adapters, and the rest of Healix cannot tell
 them apart: `PlaywrightDriverAdapter` (the default) and `SeleniumDriverAdapter`
-(`healix.driver.selenium_adapter`, `browser="chrome"`, `"firefox"` or `"edge"`; only Chrome is
-covered by Healix's own tests). Both take `platform_adapters=` (see
+(`healix.driver.selenium_adapter`, `browser="chrome"`, `"firefox"` or `"edge"`; Chrome is what
+Healix's own tests cover and support. Firefox runs in a separate, non-blocking CI job until it has
+a green history, and Edge is untested). Both take `platform_adapters=` (see
 [Platform adapters](#platform-adapters)), and both accept an existing `Page` / `WebDriver` to embed
 in a session you manage.
 
 `navigate()` waits for the `load` event and then, best-effort, up to `settle_timeout_ms`
 (default 3000) for the page to go quiet so client-rendered pages have content before it is read.
-Set it to `0` to skip that wait.
+Set it to `0` to skip that wait. `quiet_ms` (or `crawl.extraction.settle_quiet_ms` in the run
+config) sets how long the page must stay unchanged, on both backends; see below.
 
 **Selenium differs from Playwright in three ways, and the adapter makes up for each:**
 
 | | Playwright | Selenium adapter |
 |---|---|---|
-| Waiting for the page | Network idle | No "network idle" exists in WebDriver, so it waits for `load`, then for no new resources or elements for `quiet_ms` (default 500). A request still *in flight* is invisible, so an API that answers more slowly than `quiet_ms` can be missed: raise `quiet_ms` for slow back ends |
+| Waiting for the page | Network idle. Off by default, `quiet_ms` adds a second wait for no new resources or elements, for pages that render from a timer or a script of their own after network idle | No "network idle" exists in WebDriver, so it waits for `load`, then for no new resources or elements for `quiet_ms` (default 500). A request still *in flight* is invisible, so an API that answers more slowly than `quiet_ms` can be missed: raise `quiet_ms` for slow back ends |
 | Clicking and typing | Waits until the element is actionable | Retries for up to `action_timeout_ms` (default 5000) while the element is missing, covered or not yet interactable. An ambiguous selector is reported at once, never retried |
 | A page that will not load | `goto` raises | Some browsers show an error page and report success; the adapter detects it and raises, so a failed load is never read as a page |
 
@@ -926,7 +928,7 @@ These three are generic core capabilities, not per-vendor code.
 
 | Capability | Behavior |
 |---|---|
-| Iframes | The frame tree is walked recursively. Same-origin frames are merged into the page's elements, each tagged with its `iframe_path`. Cross-origin frames (and everything beneath them) are listed by `get_frames()` with `same_origin=False` and skipped |
+| Iframes | The frame tree is walked recursively. Same-origin frames are merged into the page's elements, each tagged with its `iframe_path`. Cross-origin frames (and everything beneath them) are listed by `get_frames()` with `same_origin=False` and skipped; `skipped_frames()` says which frames a read left out and why, and the page output records them |
 | Shadow DOM | Open shadow roots are pierced recursively. `css_selector` crosses the boundary with a descendant combinator; `shadow_path` lists each host's selector, outermost first |
 | Stable IDs | Volatile id segments are replaced with placeholders; both `id` and `id_normalized` are stored, and `find` falls back to the normalized form when the raw id no longer resolves |
 
@@ -1092,6 +1094,7 @@ without revisiting that.
 | `output_path` | `"./output/"` | Where `manifest.json` and `pages/` go |
 | `iframe_traversal` | `true` | Merge same-origin frames' elements in; `false` reads the main frame only (open shadow roots are still pierced) |
 | `platform_detection` | `"auto"` | `auto`: the [platform adapters](#platform-adapters) may add `platform_signal`, and the manifest records `platform_detected`. `off`: neither |
+| `settle_quiet_ms` | `null` | How long a page must stay unchanged (no new resources, no new elements) before it is read. `null` keeps each backend's own behaviour: Selenium waits 500 ms, Playwright waits for network idle only. Set it (for example `2000`) for client-rendered sites that render after network idle. It applies to discovery too, and is bounded by the driver's `settle_timeout_ms`. See [The `Driver` abstraction](#the-driver-abstraction) |
 
 ### Output layout
 
@@ -1128,7 +1131,12 @@ written atomically.
 }
 ```
 
-`final_url` is added only when the page redirected. `page_type` and `structural_hash` are from
+`final_url` is added only when the page redirected. `skipped_frames` is added only when a frame's
+elements are missing from `elements`: a list of `{"path": ["main", "ads"], "url": "…", "reason": "…"}`
+with `reason` one of `cross_origin` (the frame has another origin, so a script cannot read it),
+`inside_cross_origin_frame` (it has the page's origin, but sits inside a cross-origin frame, so it
+cannot be reached either) and `unreadable` (it could be reached but reading it failed, for example
+because it navigated away mid-read). A page without the key had nothing skipped. `page_type` and `structural_hash` are from
 the fresh extraction — if the structure changed since discovery, that is logged at `info`.
 `by_frame` keys are the `iframe_path` joined with `/`. Only the structural representative of a
 group of same-template pages is extracted; the others are listed under its `variant_urls`.
@@ -1269,16 +1277,18 @@ These are fixed unless explicitly reopened:
   Oracle Forms aren't in the DOM at all, so no locator strategy can reach their elements.
   This is a hard boundary, and the healer is designed to fail cleanly on it.
 - **Closed shadow roots** are not reachable.
-- **Cross-origin iframes** are listed but not extracted, and a same-origin frame nested
-  inside a cross-origin one is skipped too.
+- **Cross-origin iframes** are not extracted, and a same-origin frame nested inside a
+  cross-origin one is skipped too. Neither is dropped silently: the page's `skipped_frames`
+  names each one and the reason.
 - **Extraction reads a page from a fresh navigation.** Client-side state and filled-in forms are
   not reproduced. The browser keeps its login session across the run, but with `--no-login`, no
   credentials, or a failed login, a page that redirects to a login page is recorded as `failed`.
 - **Script-only navigation** — buttons and router pushes with no `<a href>` — is invisible
   to discovery.
-- **Client-rendered sites that never go network-idle** may be read before they finish
-  rendering. Pages with an identical (e.g. empty) structure would then collapse into one
-  manifest entry.
+- **Client-rendered sites** that render after network idle, or never go idle, may be read before
+  they finish rendering, and pages with an identical (e.g. empty) structure would then collapse
+  into one manifest entry. Set `crawl.extraction.settle_quiet_ms` to wait for the page to stop
+  changing; it is off by default on Playwright, and it cannot see a request still in flight.
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
 - **Webhook delivery is best-effort**, not durable — see [Webhooks](#webhooks).
@@ -1308,7 +1318,9 @@ These are fixed unless explicitly reopened:
 | 9 | Packaging (extras, `.env.example`, MIT licence, README), `healix doctor`, PyPI release | ✅ Done |
 
 Releases go out from a version tag (`v*`) through the `release` workflow, which publishes to PyPI
-with trusted publishing.
+with trusted publishing. Before anything is built it checks that the tag matches the version in
+`pyproject.toml` and `healix.__version__` and that the changelog has an entry for it, and it runs the
+full CI suite on the tagged commit; a failure in any of them stops the release.
 
 
 ## API reference
@@ -1342,6 +1354,9 @@ The browser tests run real headless Chromium against small fixture sites served 
 HTTP (including a second origin for the cross-origin cases); they skip themselves if
 Playwright or its browsers aren't installed. Most of them run once per backend, so Selenium tests
 need Chrome. The generation tests build scripts from a real crawl and run them, on both backends.
+Set `HEALIX_TEST_SELENIUM_BROWSER=firefox` to run the Selenium tests on Firefox (CI has a
+non-blocking job that does); asking for a browser by name means a launch failure fails the test
+instead of skipping it.
 
 The PostgreSQL store tests need a real server. Set `HEALIX_TEST_POSTGRES_URL` to point at one (CI
 does, with a service container), or just have Docker running: the tests start a throwaway

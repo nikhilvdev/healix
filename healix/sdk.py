@@ -177,6 +177,7 @@ class _Runner:
                     self.config.backend,
                     headless=self.headless,
                     platform_detection=self.config.extraction.platform_detection,
+                    quiet_ms=self.config.extraction.settle_quiet_ms,
                 )
                 driver.start()
                 stack.callback(driver.close)

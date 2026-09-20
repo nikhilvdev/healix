@@ -192,7 +192,7 @@ def test_a_caller_supplied_driver_is_never_started_or_closed(tmp_path):
 def test_an_owned_driver_is_started_and_closed(tmp_path, monkeypatch):
     made = []
 
-    def fake_create(backend, *, headless, platform_detection):
+    def fake_create(backend, *, headless, platform_detection, quiet_ms):
         made.append((backend, headless))
         driver = FakeSiteDriver(small_site())
         made.append(driver)
@@ -221,7 +221,7 @@ def test_the_selenium_backend_says_how_to_install_it_when_it_is_missing(tmp_path
 def test_the_run_config_decides_whether_platform_adapters_run(tmp_path, monkeypatch):
     seen = []
 
-    def fake_create(backend, *, headless, platform_detection):
+    def fake_create(backend, *, headless, platform_detection, quiet_ms):
         seen.append(platform_detection)
         return FakeSiteDriver(small_site())
 
@@ -231,6 +231,21 @@ def test_the_run_config_decides_whether_platform_adapters_run(tmp_path, monkeypa
     off["crawl"]["extraction"].update(platform_detection="off", output_path=str(tmp_path / "off"))
     Crawler(off).discover()
     assert seen == ["auto", "off"]
+
+
+def test_the_run_config_decides_how_long_a_page_must_be_quiet(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_create(backend, *, headless, platform_detection, quiet_ms):
+        seen.append(quiet_ms)
+        return FakeSiteDriver(small_site())
+
+    monkeypatch.setattr("healix.sdk.create_driver", fake_create)
+    Crawler(config(tmp_path)).discover()  # not set: the backend's own default
+    slow = config(tmp_path)
+    slow["crawl"]["extraction"].update(settle_quiet_ms=1500, output_path=str(tmp_path / "slow"))
+    Crawler(slow).discover()
+    assert seen == [None, 1500]
 
 
 def test_an_invalid_webhook_url_fails_at_construction(tmp_path):

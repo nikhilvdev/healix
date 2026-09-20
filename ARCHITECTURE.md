@@ -1,6 +1,6 @@
 # Healix architecture
 
-How Healix 1.0 is built: what each part is for, how data moves between the parts, and where the
+How Healix is built: what each part is for, how data moves between the parts, and where the
 lines are that must not be crossed. It describes the code as it is. For how to *use* Healix see the
 [README](README.md); for how to contribute see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -173,8 +173,9 @@ rest by tests of the behaviour they describe and by review:
 | `cli.py`, `__main__.py` | `healix crawl / extract / generate / doctor`; exit codes; `.env` loading. |
 | `doctor.py` | Environment checks for `healix doctor`. |
 | `config.py` | `RunConfig`: parse and validate the run JSON; reject secrets. |
-| `driver/base.py` | `Driver` ABC, `Element`, `Frame`, `Target`, `ElementNotFoundError`. |
+| `driver/base.py` | `Driver` ABC, `Element`, `Frame`, `SkippedFrame`, `Target`, `ElementNotFoundError`. |
 | `driver/frames.py` | In-page JavaScript (collector, queries) and `collect_elements`, `walk_frames`. |
+| `driver/settle.py` | `wait_until_quiet`: the shared "page stopped changing" wait, with no browser import. |
 | `driver/playwright_adapter.py` | `PlaywrightDriverAdapter`. |
 | `driver/selenium_adapter.py` | `SeleniumDriverAdapter`. |
 | `driver/factory.py` | `create_driver`, `diagnose_backend`, `BackendUnavailableError`. |
@@ -314,24 +315,28 @@ locator of every element, and whole crawls between the two.
 
 | | `PlaywrightDriverAdapter` | `SeleniumDriverAdapter` |
 |---|---|---|
-| Browser | Chromium (`browser="chromium"`) | Chrome (Firefox and Edge accepted, untested) |
+| Browser | Chromium (`browser="chromium"`) | Chrome (Firefox is exercised by a non-blocking CI job; Edge is accepted, untested) |
 | Lifecycle | Launches and owns a browser, or wraps a `page` you pass in | Launches and owns a browser, or wraps a `webdriver` you pass in |
 | Native selectors | Pierce open shadow roots and wait for actionability | Do not; the adapter uses in-page queries |
 | Shadow / frames | Shared collector; native locators | Shared collector plus `QUERY_JS`, `TEXT_JS`, `IDS_JS`, `CHILD_FRAMES_JS` |
-| Waiting | `navigate` waits for `load`; `settle` waits for any navigation in flight, then for network-idle, bounded by `settle_timeout_ms` (busy pages that never go idle simply time out) | Heuristic `settle`: `readyState` complete, then no new resources or elements for `quiet_ms` (500), bounded by `settle_timeout_ms` |
+| Waiting | `navigate` waits for `load`; `settle` waits for any navigation in flight, then for network-idle, bounded by `settle_timeout_ms` (busy pages that never go idle simply time out). Opt-in `quiet_ms` (default 0) then also waits for no new resources or elements, inside the same budget | Heuristic `settle`: `readyState` complete, then no new resources or elements for `quiet_ms` (500), bounded by `settle_timeout_ms` |
 | Acting | Playwright auto-waits | `click`/`write` retry up to `action_timeout_ms` (5 s) while the element is missing, covered, stale or not interactable; an ambiguous match fails immediately |
 | Errors | Navigation retried up to 3 times if interrupted by a failed prior load | Browser error pages (`chrome-error://`, …) raise instead of being read as pages |
 | Driver noise | none | `cd_frame_id_` (stamped by chromedriver) is scrubbed; unhandled prompts dismissed |
 
-Selenium's `settle` is a heuristic: WebDriver cannot see a request still in flight, so a slow API
-call that outlasts `quiet_ms` can be missed. This is documented, and both knobs are configurable.
+The quiet window is a heuristic on both backends: it watches the page's own resources and elements
+(`ACTIVITY_EXPRESSION` in `driver/settle.py`, polled by `wait_until_quiet`), and WebDriver cannot see
+a request still in flight, so a slow API call that outlasts `quiet_ms` can be missed. It exists on
+Playwright because a page that renders from a timer, or from a script it starts itself, can pass
+network idle and still be empty. Both knobs are configurable, from the run config too
+(`crawl.extraction.settle_quiet_ms`, `null` meaning each backend's own default).
 
 Selenium frame handling: a `_FrameRef` is the chain of `<iframe>` elements from the top document; a
 `_frame` context manager switches into it and always back to default content.
 
 ### Factory and diagnostics
 
-`create_driver(backend, *, headless, platform_detection)` returns a not-yet-started driver, imports
+`create_driver(backend, *, headless, platform_detection, quiet_ms)` returns a not-yet-started driver, imports
 the adapter lazily, and turns an `ImportError` into `BackendUnavailableError` with the install hint.
 `diagnose_backend(backend)` (used by `healix doctor`) checks the package with `find_spec`, then calls
 the adapter's own `diagnose()`, which reports the package version and whether a browser binary
@@ -785,7 +790,8 @@ One JSON document, safe to commit (`config.py`):
     "discovery":  {"domain_scope": "same_domain", "max_pages": 50,
                    "dedupe_by": "url_normalized_and_structural_hash", "template_sample_size": 3},
     "extraction": {"sequence": "one_by_one", "output_format": "json", "output_path": "./output/",
-                   "iframe_traversal": true, "platform_detection": "auto"}
+                   "iframe_traversal": true, "platform_detection": "auto",
+                   "settle_quiet_ms": null}
   },
   "backend": "playwright | selenium"
 }
@@ -823,7 +829,8 @@ healix.db                         default SQLite fingerprint store (git-ignored)
 
 A page document: `schema_version`, `run_id`, `url`, `final_url` (only if it redirected), `page_type`,
 `structural_hash`, `captured_at`, `element_counts` (`total`, `visible`, `in_shadow_root`, `by_tag`,
-`by_frame`), and `elements` in the raw schema. **Treat these files as sensitive**: they contain
+`by_frame`), `elements` in the raw schema, and `skipped_frames` (only when a frame's elements are
+missing: `path`, `url` and a `reason` of `cross_origin`, `inside_cross_origin_frame` or `unreadable`). **Treat these files as sensitive**: they contain
 attribute values, link URLs and hidden-input values (only password `value`s are redacted).
 
 Manifest and page files are written atomically (`fs.py`: temp file in the same directory, then
@@ -885,8 +892,11 @@ fails: swallowed hook errors, the navigation retry, ambiguity-not-retried, `plat
 fingerprint recording, string escaping in generated code.
 
 **CI** (`.github/workflows/ci.yml`): Python 3.10–3.13, a Postgres service, `playwright install`,
-`ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov`. **`docs.yml`** publishes the pdoc
-API reference; **`release.yml`** publishes to PyPI from a `v*` tag.
+`ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov`. A separate `selenium-firefox` job
+runs the Selenium tests with `HEALIX_TEST_SELENIUM_BROWSER=firefox`; it is `continue-on-error`, so it
+informs but does not gate, until it has a green history. **`docs.yml`** publishes the pdoc API
+reference; **`release.yml`** publishes to PyPI from a `v*` tag, after a `verify` job and the whole of
+`ci.yml` (called as a reusable workflow) have passed.
 
 ## 20. Packaging and release
 
@@ -898,7 +908,10 @@ API reference; **`release.yml`** publishes to PyPI from a `v*` tag.
 - Console script: `healix = healix.cli:main` (also `python -m healix`).
 - The sdist is an explicit allow-list (package, tests, top-level docs, `LICENSE`, `.env.example`).
 - Release: bump the version in `pyproject.toml` and `healix/__init__.py`, update `CHANGELOG.md`, push
-  a `v*` tag; `release.yml` builds and publishes with PyPI trusted publishing (no token).
+  a `v*` tag. `release.yml` first checks that the tag, both version strings and a changelog heading
+  agree, and runs the full CI suite on the tagged commit; only then does it build and publish with PyPI
+  trusted publishing (no token). A release that fails a gate is fixed and re-tagged, since PyPI never
+  accepts the same version twice.
 
 ## 21. Extension points
 
@@ -936,12 +949,16 @@ Documented rather than hidden; each is also in the README.
 
 - **Canvas-rendered UI is unsupported**: not in the DOM, so nothing can extract or heal it. The
   healer fails cleanly.
-- **Closed shadow roots and cross-origin iframes** are not reachable and are skipped.
+- **Closed shadow roots and cross-origin iframes** are not reachable and are skipped. Frames are
+  reported in the page's `skipped_frames`; a closed shadow root is not (a script cannot tell one is
+  there).
 - **Script-only navigation** (buttons and router pushes with no `<a href>`) is invisible to discovery.
 - **Extraction reads each page from a fresh navigation.** Client-side state and filled-in forms are not
   reproduced.
 - **Structural dedup is coarse by design**; `dedupe_by="url_normalized"` turns it off.
-- **Selenium's `settle` is a heuristic** and cannot see in-flight requests; only Chrome is tested.
+- **The quiet-window wait is a heuristic** on both backends and cannot see in-flight requests. On
+  Playwright it is opt-in. Only Chrome is a supported Selenium browser; Firefox runs in a non-blocking
+  CI job.
 - **Platform signals are recorded, not scored.** The Salesforce adapter has not run against a real org;
   the SAP adapter was checked against real OpenUI5 and otherwise stub-tested.
 - **Healing is not a substitute for a test.** A healed element is *probably* the same one; heals are
@@ -953,5 +970,6 @@ Documented rather than hidden; each is also in the README.
 - **Webhook delivery is best-effort.**
 - **Generated scripts** need Healix at runtime, do not log in by themselves, and check presence not
   behaviour; they were tested on fixture sites, not a large real application.
-- **CI's Postgres and Selenium paths and the release workflow** have not run remotely at the time of
-  writing.
+- **The release gate has not run remotely yet.** It was tested by running its check script against
+  good and bad tags and versions, and the workflow files were parsed; the first tagged release is its
+  first real run. The Firefox job has never run on a runner.

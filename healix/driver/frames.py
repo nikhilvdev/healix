@@ -13,7 +13,8 @@ Nothing here imports a browser library or knows about any vendor:
 * ``collect_elements`` runs the collector in each same-origin frame and merges
   the results, tagging every element with its ``iframe_path``.
 
-Closed shadow roots and cross-origin frames are not reachable and are skipped.
+Closed shadow roots and cross-origin frames are not reachable and are skipped; the frames are
+reported (``SkippedFrame``) so a page's output says what it is missing.
 """
 
 from __future__ import annotations
@@ -23,7 +24,15 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
-from healix.driver.base import MAIN_FRAME, Element, Frame
+from healix.driver.base import (
+    CROSS_ORIGIN,
+    INSIDE_CROSS_ORIGIN,
+    MAIN_FRAME,
+    UNREADABLE,
+    Element,
+    Frame,
+    SkippedFrame,
+)
 from healix.log import get_logger
 from healix.platform_adapters.base import PlatformAdapter
 
@@ -440,7 +449,16 @@ def walk_frames(
             same_origin = parent_same_origin and origin == root_origin
             path = [*parent_path, label]
             frames.append(
-                Frame(path=path, url=url, name=name, same_origin=same_origin, handle=child)
+                Frame(
+                    path=path,
+                    url=url,
+                    name=name,
+                    same_origin=same_origin,
+                    handle=child,
+                    skip_reason=None
+                    if same_origin
+                    else (CROSS_ORIGIN if parent_same_origin else INSIDE_CROSS_ORIGIN),
+                )
             )
             visit(child, path, same_origin, origin)
 
@@ -458,17 +476,24 @@ def _unique_label(label: str, used: set[str]) -> str:
 
 
 def collect_elements(
-    frames: Iterable[Frame], run_collector: Callable[[Frame], list[dict[str, Any]]]
+    frames: Iterable[Frame],
+    run_collector: Callable[[Frame], list[dict[str, Any]]],
+    *,
+    skipped: list[SkippedFrame] | None = None,
 ) -> list[Element]:
     """Run ``run_collector`` in every same-origin frame and merge the results.
 
     A frame that fails mid-collection (e.g. it navigated or detached) is logged
-    and skipped rather than failing the whole page.
+    and skipped rather than failing the whole page. Every skipped frame, unreachable or
+    failed, is appended to ``skipped`` (when given) with the reason.
     """
     elements: list[Element] = []
     for frame in frames:
         if not frame.same_origin:
-            logger.debug("skipping cross-origin frame", frame=frame.path, url=frame.url)
+            reason = frame.skip_reason or CROSS_ORIGIN
+            logger.debug("skipping frame", frame=frame.path, url=frame.url, reason=reason)
+            if skipped is not None:
+                skipped.append(SkippedFrame(list(frame.path), frame.url, reason))
             continue
         try:
             raw_elements = run_collector(frame)
@@ -479,6 +504,8 @@ def collect_elements(
                 url=frame.url,
                 error=str(exc),
             )
+            if skipped is not None:
+                skipped.append(SkippedFrame(list(frame.path), frame.url, UNREADABLE))
             continue
         elements.extend(Element.from_dict(raw, iframe_path=frame.path) for raw in raw_elements)
     return elements

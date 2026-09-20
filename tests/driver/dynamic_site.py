@@ -22,6 +22,14 @@ PAGES = {
         "  document.body.insertAdjacentHTML('beforeend', '<p id=\"late\">' + t + '</p>'); });"
         "</script></body>"
     ),
+    # Content rendered from a timer, with no request at all: network idle cannot see it coming. The
+    # delay is well past the ~0.5 s network idle takes, and well inside the quiet window the test
+    # asks for, so neither a slow nor a fast machine changes the outcome.
+    "/timer": (
+        "<!doctype html><body><h1>Timer</h1><script>setTimeout(() => {"
+        "  document.body.insertAdjacentHTML('beforeend', '<p id=\"rendered\">done</p>'); }, 2000);"
+        "</script></body>"
+    ),
     # A page that keeps making requests for as long as it is open.
     "/chatty": (
         "<!doctype html><body><h1>Chatty</h1><script>"

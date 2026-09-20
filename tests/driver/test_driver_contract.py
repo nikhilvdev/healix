@@ -81,6 +81,26 @@ def test_cross_origin_frame_is_listed_but_not_extracted(page):
     assert all(e.id != "foreign-btn" for e in page.get_elements())
 
 
+def test_a_frame_that_cannot_be_read_is_reported_with_its_reason(page):
+    page.get_elements()
+    skipped = page.skipped_frames()
+    assert [(f.path, f.reason) for f in skipped] == [(["main", "foreign"], "cross_origin")]
+    assert skipped[0].url.endswith("/foreign.html")
+
+
+def test_nothing_is_reported_skipped_when_iframes_are_not_traversed(page):
+    page.get_elements(iframe_traversal=False)
+    assert page.skipped_frames() == []
+
+
+def test_the_skipped_frames_are_those_of_the_latest_read(page, site_url):
+    page.get_elements()
+    assert page.skipped_frames()
+    page.navigate(site_url + "/form.html")
+    page.get_elements()
+    assert page.skipped_frames() == []
+
+
 def test_open_shadow_roots_are_pierced_recursively(page):
     elements = page.get_elements()
     button = _by(elements, tag="button", css_selector="#lwc-host div > button")

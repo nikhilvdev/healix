@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
 
 BACKENDS = ["playwright", "selenium"]
 
+# Set to run the Selenium tests on another browser (CI does this for Firefox). Asking for a
+# browser by name means it has to be there: a launch failure then fails the test instead of
+# quietly skipping it, so a broken job cannot look green.
+SELENIUM_BROWSER_ENV = "HEALIX_TEST_SELENIUM_BROWSER"
+
 
 def make_driver(backend: str, **kwargs: Any):
     """A started driver for ``backend``; the test is skipped when it cannot be launched."""
     pytest.importorskip(backend)
+    requested = os.environ.get(SELENIUM_BROWSER_ENV) if backend == "selenium" else None
+    if requested:
+        kwargs.setdefault("browser", requested)
     if backend == "playwright":
         from healix.driver.playwright_adapter import PlaywrightDriverAdapter
 
@@ -23,6 +32,8 @@ def make_driver(backend: str, **kwargs: Any):
     try:
         driver.start()
     except Exception as exc:  # browser (or its driver) not installed
+        if requested:
+            raise
         pytest.skip(f"cannot launch {backend}: {str(exc).splitlines()[0]}")
     return driver
 

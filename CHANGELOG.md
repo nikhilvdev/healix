@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.1.0 — 2026-09-20
+
+Existing configs, manifests, event payloads and generated scripts keep working, and every new
+setting is optional with a default that keeps 1.0 behaviour. The one visible difference is the new
+`skipped_frames` key in a page file whose page had a frame that could not be read.
+
+### Added
+- **`skipped_frames` in the page output.** A frame whose elements are missing from a page — a
+  cross-origin frame, a frame inside one, or a frame that could not be read — is now listed with its
+  `path`, `url` and a `reason` (`cross_origin`, `inside_cross_origin_frame`, `unreadable`) instead of
+  being dropped silently. The key is present only when something was skipped. On the driver side,
+  `Driver.skipped_frames()` returns the same list for the latest `get_elements()`, and `SkippedFrame`
+  is exported from `healix.driver`.
+- **A quiet-window wait for Playwright**, for client-rendered sites that render after network idle
+  (from a timer, or from a script of their own). `PlaywrightDriverAdapter(quiet_ms=…)` waits for no
+  new resources or elements for that long, inside `settle_timeout_ms`. It is off by default.
+- **`crawl.extraction.settle_quiet_ms`** in the run config, and `quiet_ms=` on `create_driver`, set
+  that window on either backend from one place. `null` (the default) keeps each backend's own
+  behaviour. It applies to discovery as well as extraction.
+
+### Changed
+- **The release workflow gates on the tests.** Before anything is built it checks that the tag matches
+  the version in `pyproject.toml` and `healix.__version__` and that this changelog has an entry for
+  it, and it runs the whole CI suite on the tagged commit. A failure in any of them stops the release.
+- Selenium's quiet-window wait now shares one implementation with Playwright's
+  (`healix/driver/settle.py`). Its behaviour is unchanged.
+- CI has a Selenium-on-Firefox job. It does not block merges or releases until it has a green
+  history, so Firefox is still not a supported Selenium browser.
+
+### Fixed
+- A timing-sensitive test of Selenium's quiet window failed on slow machines. The behaviour it covers
+  is unchanged.
+
 ## 1.0.0 — 2026-09-20
 
 The first release: discovery, classification, extraction, login, self-healing, the Selenium and
