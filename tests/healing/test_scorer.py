@@ -1,12 +1,17 @@
+import dataclasses
+
 import pytest
 
+from healix.driver.base import Element
 from healix.healing.fingerprint import Fingerprint
 from healix.healing.scorer import (
     DEFAULT_THRESHOLD,
     EVIDENCE_TARGET,
     LOCATOR_PRIORITY,
+    MIN_LOCATOR_EVIDENCE,
     WEIGHTS,
     is_trusted_strategy,
+    locator_hit_holds,
     rank_candidates,
     score_candidate,
     text_similarity,
@@ -258,3 +263,111 @@ def test_without_a_tag_path_the_signal_falls_back_to_the_xpath():
     assert path_signal(fp_username(), username()) == 1.0
     anchored = fingerprint_of(username(xpath='//*[@id="user-4471"]'), "r")
     assert path_signal(anchored, username(xpath='//*[@id="x"]')) is None  # nothing to compare
+
+
+# --- a locator's hit on an element that has almost nothing to identify it -------------------- #
+# Found on a real site: an image-only link (no text, label, name or test id) can never reach the
+# threshold once damping caps it, even when it is exactly the element that was recorded.
+
+
+def image_link(href="catalogue/a-light-in-the-attic_1000/index.html"):
+    return Element.from_dict(
+        {
+            "tag": "a",
+            "attributes": {"href": href},
+            "computed": {"visible": True, "href": "https://books.example/" + href},
+            "css_selector": "#default > ol > li:nth-of-type(1) > article > div > a",
+            "xpath": "//ol[1]/li[1]/article[1]/div[1]/a[1]",
+            "dom_context": {
+                "parent_tag": "div",
+                "sibling_index": 0,
+                "tag_path": ["html", "body", "ol", "li", "a"],
+            },
+        },
+        iframe_path=["main"],
+    )
+
+
+def test_an_unchanged_image_link_is_identical_but_damped_below_the_threshold():
+    fp = fingerprint_of(image_link(), "link:index-html")
+    score = score_candidate(fp, image_link())
+    assert score.raw == 1.0
+    assert score.confidence < DEFAULT_THRESHOLD  # only its href and its position can be compared
+
+
+def test_a_locator_hit_that_agrees_on_everything_comparable_holds_even_when_damped():
+    fp = fingerprint_of(image_link(), "link:index-html")
+    assert locator_hit_holds(fp, score_candidate(fp, image_link()), DEFAULT_THRESHOLD)
+
+
+def test_a_locator_hit_whose_href_differs_does_not_hold():
+    fp = fingerprint_of(image_link(), "link:index-html")
+    other = image_link(href="catalogue/tipping-the-velvet_999/index.html")
+    assert not locator_hit_holds(fp, score_candidate(fp, other), DEFAULT_THRESHOLD)
+
+
+def test_an_element_with_nothing_but_its_position_is_trusted_at_that_position():
+    """A bare disabled text box: no name, label, text or id. Found on a real page; it could not be
+    found again even though nothing had changed."""
+
+    def bare():
+        return el(
+            "input",
+            type="text",
+            disabled="",
+            sel="#input-example > input",
+            dom={
+                "parent_tag": "form",
+                "sibling_index": 0,
+                "tag_path": ["html", "body", "form", "input"],
+            },
+        )
+
+    fp = fingerprint_of(bare(), "textbox")
+    score = score_candidate(fp, bare())
+    assert score.confidence < DEFAULT_THRESHOLD and score.raw == 1.0
+    assert locator_hit_holds(fp, score, DEFAULT_THRESHOLD)
+
+
+def test_a_hit_that_differs_in_what_the_element_says_never_holds():
+    def button(text):
+        return el(
+            "button",
+            text=text,
+            sel="#b",
+            dom={
+                "parent_tag": "li",
+                "sibling_index": 0,
+                "tag_path": ["html", "body", "ul", "li", "button"],
+            },
+        )
+
+    fp = fingerprint_of(button("Add to basket"), "button")
+    assert not locator_hit_holds(fp, score_candidate(fp, button("Remove")), DEFAULT_THRESHOLD)
+
+
+def test_an_element_that_lost_the_identity_it_was_recorded_with_is_not_accepted_this_way():
+    """It agrees on every signal it still has, but the test id and name are gone: a weak match."""
+    fp = fingerprint_of(username(), "textbox:username")
+    stripped = username(data_testid=None, aria_label=None, name=None, id=None)
+    stripped.attributes.pop("data-testid", None)
+    stripped.attributes.pop("aria-label", None)
+    score = score_candidate(fp, stripped)
+    assert score.raw >= 0.9 and score.evidence < 1.0
+    assert not locator_hit_holds(fp, score, DEFAULT_THRESHOLD)
+
+
+def test_a_fingerprint_with_almost_nothing_to_compare_never_holds():
+    lonely = el("div", sel="#x")  # no attributes, no context: nothing beyond the tag
+    fp = fingerprint_of(lonely, "div")
+    score = score_candidate(fp, el("div", sel="#x"))
+    assert score.evidence < MIN_LOCATOR_EVIDENCE
+    assert not locator_hit_holds(fp, score, DEFAULT_THRESHOLD)
+
+
+def test_a_caller_who_asks_for_a_stricter_match_still_gets_one():
+    fp = fingerprint_of(image_link(), "link:index-html")
+    identical = score_candidate(fp, image_link())
+    assert locator_hit_holds(fp, identical, 1.0)  # raw is 1.0, so even a perfect bar is met
+    assert not locator_hit_holds(fp, dataclasses.replace(identical, raw=0.92), 0.95)
+    assert locator_hit_holds(fp, dataclasses.replace(identical, raw=0.92), 0.5)

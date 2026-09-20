@@ -324,7 +324,7 @@ locator of every element, and whole crawls between the two.
 
 | | `PlaywrightDriverAdapter` | `SeleniumDriverAdapter` |
 |---|---|---|
-| Browser | Chromium (`browser="chromium"`) | Chrome (Firefox is exercised by a non-blocking CI job; Edge is accepted, untested) |
+| Browser | Chromium (`browser="chromium"`) | Chrome and Firefox (both run in CI; the Firefox job does not gate); Edge is accepted, untested |
 | Lifecycle | Launches and owns a browser, or wraps a `page` you pass in | Launches and owns a browser, or wraps a `webdriver` you pass in |
 | Native selectors | Pierce open shadow roots and wait for actionability | Do not; the adapter uses in-page queries |
 | Shadow / frames | Shared collector; native locators | Shared collector plus `QUERY_JS`, `TEXT_JS`, `IDS_JS`, `CHILD_FRAMES_JS` |
@@ -680,6 +680,17 @@ there was** (comparable weight against `EVIDENCE_TARGET` 0.5), so a candidate co
 or two weak signals cannot score high. Volatile attributes (`style`, framework hash attributes,
 `aria-expanded`, …) are never compared.
 
+**The locator-hit exception** (`locator_hit_holds`). Damping makes an element with little to identify
+it (an image-only link, an icon button) unable to reach the threshold even when it is exactly the
+element recorded, so an unchanged page would fail: found by generating tests against a real book
+shop. When a primary locator (css or xpath) resolves to a single element, the resolver therefore also
+accepts it if the live element provides **every signal the fingerprint has to offer** (scoring the
+fingerprint against itself gives that ceiling) and **raw similarity is at least 0.9** (or the caller's
+threshold, if higher). An element that has *lost* the test id, name or text it was recorded with fails
+the first condition, and any differing href, text, label or class fails the second, so both stay weak
+matches. It applies only to checking a locator's hit, never to ranking candidates. Its known limit: a
+look-alike that differs in nothing Healix can see is accepted at the recorded position.
+
 ### The history (`healing/history.py`)
 
 Every heal is a `HealRecord`: `kind` (`fallback` or `scored`), `strategy`, `confidence`, old and new
@@ -988,7 +999,7 @@ host and path, never query strings. Extraction output is documented as sensitive
 
 ## 19. Testing architecture
 
-About 900 tests, most of which run a real browser. The layout mirrors the package.
+About 1,200 tests, most of which run a real browser. The layout mirrors the package.
 
 | Area | Kind | What it proves |
 |---|---|---|
@@ -1002,6 +1013,7 @@ About 900 tests, most of which run a real browser. The layout mirrors the packag
 | `generation/test_script_writer.py` | unit | styles, naming, secrets, injection, skipping, events |
 | `generation/test_generated_scripts_run.py` | integration, both backends | generated scripts run, survive a redesign, and the generated tests fail when the form is gone |
 | `test_cli*.py`, `test_doctor.py`, `test_sdk*.py` | unit + integration | the public surface and exit codes |
+| `real_sites/` | opt-in, needs the network (`HEALIX_REAL_SITES=1`) | crawls six public practice sites, generates scripts and runs them on both backends; the failures it allows are the sites' own (pages that randomise themselves, a page behind a login) |
 | `test_architecture.py` | source scan | only the two adapters import a browser library; only the factory names an adapter; domain packages do not reach up to the SDK, CLI or `Healer` |
 
 **Backend parametrisation.** `tests/conftest.py` provides `backend` (a backend name; the test is
@@ -1013,14 +1025,21 @@ differ between Playwright's Chromium and system Chrome, so parity tests exclude 
 "switch site" serves different versions of one URL (baseline, churn, refactor, canvas, …) to test
 healing against a real redesign.
 
+**Real sites, and what they found.** Fixture sites are written alongside the code and cannot say how it
+behaves on pages nobody wrote for it, so `real_sites/` exists. Its first run found a real defect the
+fixtures had hidden: evidence damping stopped an *unchanged* image-only link from ever resolving (see
+the locator-hit exception in section 13). It is opt-in because a site changing, or being down, is not a
+regression, and CI should not depend on other people's servers.
+
 **Mutation checks.** Important guarantees were verified by breaking the code and confirming a test
 fails: swallowed hook errors, the navigation retry, ambiguity-not-retried, `platform_detection=off`,
 fingerprint recording, string escaping in generated code.
 
 **CI** (`.github/workflows/ci.yml`): Python 3.10–3.13, a Postgres service, `playwright install`,
 `ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov`. A separate `selenium-firefox` job
-runs the Selenium tests with `HEALIX_TEST_SELENIUM_BROWSER=firefox`; it is `continue-on-error`, so it
-informs but does not gate, until it has a green history. **`docs.yml`** publishes the pdoc API
+runs the Selenium tests with `HEALIX_TEST_SELENIUM_BROWSER=firefox` (135 tests passed on it in its
+first run); it is `continue-on-error`, so it informs but does not gate. Promote it by removing that
+line once it has run green on the commits you release from. **`docs.yml`** publishes the pdoc API
 reference; **`release.yml`** publishes to PyPI from a `v*` tag, after a `verify` job and the whole of
 `ci.yml` (called as a reusable workflow) have passed.
 
@@ -1086,8 +1105,8 @@ Documented rather than hidden; each is also in the README.
   reproduced.
 - **Structural dedup is coarse by design**; `dedupe_by="url_normalized"` turns it off.
 - **The quiet-window wait is a heuristic** on both backends and cannot see in-flight requests. On
-  Playwright it is opt-in. Only Chrome is a supported Selenium browser; Firefox runs in a non-blocking
-  CI job.
+  Playwright it is opt-in, and on three client-rendered real sites it changed nothing while costing 15 to
+  45 percent more time, so it stays off. Chrome and Firefox are exercised in CI; Edge is not.
 - **Platform signals are recorded, not scored.** The Salesforce adapter has not run against a real org;
   the SAP adapter was checked against real OpenUI5 and otherwise stub-tested.
 - **Healing is not a substitute for a test.** A healed element is *probably* the same one; heals are
@@ -1100,8 +1119,9 @@ Documented rather than hidden; each is also in the README.
   sharing one fingerprint baseline (`keep`); MFA still aborts a role's login.
 - **Webhook delivery is best-effort by default.** With an outbox it is durable, in order and at least
   once (never exactly once), with one sender per file.
-- **Generated scripts** need Healix at runtime, do not log in by themselves, and check presence not
-  behaviour; they were tested on fixture sites, not a large real application.
-- **The release gate has not run remotely yet.** It was tested by running its check script against
-  good and bad tags and versions, and the workflow files were parsed; the first tagged release is its
-  first real run. The Firefox job has never run on a runner.
+- **Generated scripts** need Healix at runtime, do not log in by themselves (so a page behind a login,
+  such as the inventory of a demo shop, fails them), and check presence not behaviour. They passed in
+  full on four of six public practice sites, and on the other two except for one page each that the site
+  itself defeats; they have not been run against a large real application. `action` needs a page with an input.
+- **The Salesforce adapter has still not run against a real org**, and no adapter has been added for a
+  platform no one has validated. Section 8 and the README say how to check it against your own org.

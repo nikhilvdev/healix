@@ -38,6 +38,7 @@ from healix.healing.scorer import (
     DEFAULT_THRESHOLD,
     Score,
     is_trusted_strategy,
+    locator_hit_holds,
     rank_candidates,
     score_candidate,
 )
@@ -186,7 +187,9 @@ class Resolver:
                 logger.debug("resolved", role=element_role, strategy=spec.strategy)
                 return HealResult(found, EXACT, spec.strategy, None, fingerprint)
             score = score_candidate(fingerprint, found)
-            if score.confidence < self.threshold:
+            if score.confidence < self.threshold and not locator_hit_holds(
+                fingerprint, score, self.threshold
+            ):
                 attempts.append(
                     f"{spec.strategy}: matched, but only {score.confidence:.2f} "
                     "like the stored element"

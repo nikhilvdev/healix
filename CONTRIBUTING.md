@@ -105,6 +105,35 @@ Some things are documented in more than one place. Change them together:
   webhook see the same payload.
 - **A new run-config key** → the config table in the README.
 
+## Checking against real sites
+
+The fixture sites were written with the code, so they cannot say how it behaves on pages nobody wrote
+for it. `tests/real_sites` crawls six public practice sites, generates scripts for them and runs the
+generated tests on both backends. It needs the network and takes a few minutes, so it is opt-in:
+
+```bash
+HEALIX_REAL_SITES=1 pytest tests/real_sites -v
+```
+
+Run it after changing how pages are read, how elements are named, or how the healer decides. A failure
+is worth a look, not always a bug: a site can change or be down, and some pages randomise themselves on
+purpose (the test says which). Its first run found a real defect the fixtures had hidden.
+
+## Releasing
+
+Releases are cut from a tag, and the `release` workflow refuses one it cannot vouch for. To release:
+
+1. Set the same version in `pyproject.toml` and `healix/__init__.py`.
+2. Give `CHANGELOG.md` a `## X.Y.Z — date` heading for it (and say plainly what changed, including
+   every changed default, or that none did).
+3. Merge to `main` and wait for CI to pass.
+4. Tag that commit `vX.Y.Z` and push the tag.
+
+The workflow then checks that the tag, both version strings and the changelog heading agree, runs the
+whole CI suite on the tagged commit, builds, and publishes through PyPI trusted publishing. A failed
+gate is fixed and re-tagged: PyPI never accepts the same version twice. Build locally with
+`python -m build --outdir <somewhere outside the repo>` if you want to inspect the files.
+
 ## Reporting issues
 
 Bug reports and feature requests are welcome via GitHub issues. For a wrong extraction or a

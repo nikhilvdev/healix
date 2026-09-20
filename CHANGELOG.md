@@ -2,10 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 2.0.0 — 2026-09-20
 
-Three opt-in additions: multi-role runs, click-through discovery, and durable webhook delivery.
-Without them, a run behaves exactly as before.
+**2.0.0 is a milestone release, not a breaking one.** A 1.1 configuration, manifest, event payload,
+generated script or SDK call works as it did, so there is nothing to migrate. The one change to
+existing behaviour is a fix (below): the resolver now finds some elements that 1.1 wrongly refused on
+an unchanged page. The release collects three opt-in features (multi-role runs, click-through
+discovery, durable webhook delivery), that fix, which was found by running Healix on real sites, and
+the evidence from doing so.
+
+**Defaults: none changed.** In particular the Playwright quiet-window wait (`settle_quiet_ms`)
+stays off. It was measured on three client-rendered public sites (`quotes.toscrape.com/js/`,
+`demo.playwright.dev/todomvc`, `saucedemo.com`) and found the same pages and the same element counts
+with and without it, at 15 to 45 percent more time. `max_pages`, `template_sample_size`,
+`click_discovery`, the healing threshold and every other default are as they were.
 
 ### Added
 - **Multi-role runs** (`"roles": ["admin", "standard"]` in the run config). The site is crawled once
@@ -45,6 +55,31 @@ Without them, a run behaves exactly as before.
   one event, so a receiver can drop a repeat. It is a header, so the payload is unchanged and still
   identical to what `on_event` receives.
 - `healix.events`: `DurableWebhookSender`, `Outbox`, `OutboxError`, `open_sender`, `EventSender`.
+
+### Fixed
+- **An unchanged element with little to identify it could not be found again.** Found by generating
+  tests for a real book shop: each product's image-only link, and a bare disabled text box on another
+  site, failed on a page that had not changed at all, because the scorer's evidence damping capped
+  such an element below the 0.5 threshold even when it was exactly the one recorded. When a css or
+  xpath locator resolves to a single element, it is now also accepted if the live element provides
+  every signal the fingerprint has to offer and all of it agrees (raw similarity of at least 0.9, or the
+  caller's threshold if higher). An element that has lost the test id, name or text it was recorded with,
+  or whose href, text, label or class differs, is still rejected as a weak match. A look-alike that
+  differs in nothing Healix can see is trusted at the recorded position. It applies to checking a
+  locator's hit only, never to choosing among candidates.
+
+### Validation
+- Every script style was generated for six public sites built to be automated and the generated tests
+  were run against them on both backends: `quotes.toscrape.com` (and its `/js/` version),
+  `books.toscrape.com`, `the-internet.herokuapp.com`, `demo.playwright.dev/todomvc` and
+  `saucedemo.com`. All passed except what the sites do to defeat them: pages that randomise their own
+  labels or menu items, and a page behind a login (generated scripts do not log in). Both backends found
+  the same pages and element counts wherever the site is deterministic. See the README's *Validated on
+  real sites*, and re-run it with `HEALIX_REAL_SITES=1 pytest tests/real_sites`.
+- Firefox: the Selenium tests ran on Firefox in CI (135 passed). The job still does not block a
+  release.
+- **Still not validated: the Salesforce adapter against a real org**, and any large real application.
+  The README says how to check the adapter against your own org.
 
 ### Notes
 - Multi-role fingerprints stay keyed by `(page_url, element_role)`: the first role to see an element

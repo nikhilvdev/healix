@@ -9,7 +9,7 @@ finds, extracts every element with maximum raw detail into JSON, and generates
 self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
-**Status: 1.1.** The driver abstraction (Playwright and
+**Status: 2.0.** The driver abstraction (Playwright and
 Selenium), iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
 surface are implemented and tested, and so are automatic login (username/password, SSO, session
@@ -427,7 +427,7 @@ healix --version          # also: python -m healix
 - `doctor` checks that this machine can run Healix and exits `0` if it can, `1` if it cannot:
 
   ```text
-  healix 1.1.0 doctor
+  healix 2.0.0 doctor
 
     ok    python         3.12.14
     ok    logquill       1.0.0
@@ -820,6 +820,19 @@ Three rules decide how they combine:
   high however well they match.
 - Text-like signals are rescaled so merely *unrelated* strings score 0 rather than a comfortable 0.3.
 
+**One exception, for a locator's own hit.** Damping keeps a *search* honest, but it also means an
+element with little to identify it (an image-only link, an icon-only button: no text, label, name or
+test id) can never reach 0.5, even when it is exactly the element that was recorded. A page that had
+not changed at all would then fail. (A real book shop found this: every product image link, and a
+bare disabled text box on another site, failed on an unchanged page.) So when the css or xpath
+locator resolves to a single element, it is accepted if the live element provides **everything the
+fingerprint has to offer** and **all of it agrees** (raw similarity of at least 0.9, or your
+threshold if that is higher). An element that has lost the test id, name or text it was recorded with
+is *not* accepted this way, and neither is one whose `href`, text, label or class differs: those are
+weak matches, rejected as before. What this cannot catch is a look-alike that differs in nothing
+Healix can see, so an element with nothing but its position to go on is trusted at that position.
+It applies only to checking a locator's hit, never to choosing among candidates.
+
 A scored heal's `healed element` log record (at `info` level) lists each signal's similarity, and
 `Score.explain()` returns the same, so a surprising heal is debuggable.
 
@@ -999,9 +1012,77 @@ off, counted in `.truncated`.
 - **Elements the crawl could not see are not scripted** — cross-origin iframes, closed shadow roots,
   canvas-rendered UI ([the canvas boundary](#the-canvas-boundary)) — and a script fails cleanly
   there, as `Healer` does.
+- **`action` needs a page with an input to fill.** A site with none (a catalogue of links) is refused
+  with `no page has an input to fill: an action script needs one`; use `pom` or `test` there.
 - Tested against the fixture sites on both backends — the scripts run in a real browser, survive a
-  redesign, and the generated tests fail when the form is removed — but **not against a large real
+  redesign, and the generated tests fail when the form is removed — and against six real public sites
+  ([Validated on real sites](#validated-on-real-sites)), but **not against a large real
   application**. Expect to edit what is generated.
+
+## Validated on real sites
+
+The fixture sites in the test-suite were written alongside Healix, so they cannot say whether it works
+on pages nobody wrote for it. Before 2.0, every kind of script was generated for six public sites
+built to be scraped and automated, and the generated tests were run against the live sites on both
+backends (each crawl bounded to at most 14 pages):
+
+| Site | Pages crawled | Generated tests passing (Playwright and Selenium) |
+|---|---|---|
+| `quotes.toscrape.com` | 4 | 4 of 4 |
+| `quotes.toscrape.com/js/` (rendered by script) | 5 | 5 of 5 |
+| `books.toscrape.com` | 2 distinct structures | 2 of 2 (about 500 elements each, all found again) |
+| `the-internet.herokuapp.com` | 13 | 9 to 11 of 11, depending on which randomised page misbehaves that load |
+| `demo.playwright.dev/todomvc` (single-page app) | 1 | 1 of 1 |
+| `saucedemo.com` (logs in with the demo login it publishes) | 2 | 1 of 2 |
+
+The failures are the sites' doing, and are what Healix should do:
+
+- `challenging_dom` **re-randomises its labels and ids on every load**, so an element cannot be told
+  from its neighbours. The healer refuses ("the two best candidates scored 0.57 and 0.56") instead of
+  guessing.
+- `disappearing_elements` **shows a menu item on some loads and not others**, so a test that looks for
+  it fails on the loads where it is gone. Which of these two pages fails varies from run to run.
+- `saucedemo.com/inventory` sits behind a login, and **generated scripts do not log in**.
+
+What validation found, and fixed: on an *unchanged* page, the generated tests failed for every element
+with little to identify it (each book's image link; a bare disabled text box). The scorer's evidence
+damping capped such an element below the threshold even when it was exactly the one recorded. It is
+fixed (see [How candidates are scored](#how-candidates-are-scored)), and a fixture with the same
+shapes now guards it. Both backends also found the same pages and the same element counts on all five
+sites they were compared on, except where the site itself is non-deterministic or Chrome behaves
+differently (a `401` page, and `http` links Chrome upgrades to `https`).
+
+It also measured the Playwright quiet-window wait (`settle_quiet_ms`) on three client-rendered sites:
+the pages and the element counts were identical with and without it, and it cost 15 to 45 percent
+more time. That is why it is still off by default.
+
+Re-run it yourself, against the live sites, whenever you change how pages are read or elements are
+found:
+
+```bash
+HEALIX_REAL_SITES=1 pytest tests/real_sites -v
+```
+
+It is opt-in (network, several minutes), so CI does not run it, and a site changing can fail it.
+These are practice sites, not the enterprise applications Healix is meant for: a large real application
+is still the test that has not been run.
+
+### Checking the Salesforce adapter against your org
+
+Nothing in the suite can load a Lightning org, so the adapter is unverified until someone runs it on
+one. A free Developer Edition org is enough, and nothing is changed in it:
+
+1. Put a login in `.env` (`WEBLIB_LOGIN_USERNAME`, `WEBLIB_LOGIN_PASSWORD`) and crawl a few pages:
+   `healix crawl --config run.json` with `"start_url"` at your `…lightning.force.com` home and
+   `"max_pages": 5`.
+2. Open `output/manifest.json`. `"platform_detected": "salesforce_lwc"` means the adapter saw the
+   Lightning globals. `null` means it did not.
+3. Open a page file. Elements inside Lightning components should carry a `platform_signal` of the form
+   `{"platform": "salesforce_lwc", "component": "lightning-input", "is_component_host": false,
+   "aura_attributes": {…}}`, and `element_counts.in_shadow_root` should be above zero.
+4. If it does not detect Lightning, or a component tag is wrong, open an issue with the page's
+   `platform_signal` values (never with credentials or record data). The generic pipeline works
+   either way: an adapter only ever *adds* a signal.
 
 ## How it works
 
@@ -1039,9 +1120,9 @@ class Driver(ABC):
 Extraction, discovery, healing, classification, and generation never import `playwright`
 or `selenium`; they go through `Driver`. There are two adapters, and the rest of Healix cannot tell
 them apart: `PlaywrightDriverAdapter` (the default) and `SeleniumDriverAdapter`
-(`healix.driver.selenium_adapter`, `browser="chrome"`, `"firefox"` or `"edge"`; Chrome is what
-Healix's own tests cover and support. Firefox runs in a separate, non-blocking CI job until it has
-a green history, and Edge is untested). Both take `platform_adapters=` (see
+(`healix.driver.selenium_adapter`, `browser="chrome"`, `"firefox"` or `"edge"`; Chrome and Firefox are
+both run through Healix's own Selenium tests in CI (the Firefox job informs but does not block a
+merge or a release), and Edge is untested). Both take `platform_adapters=` (see
 [Platform adapters](#platform-adapters)), and both accept an existing `Page` / `WebDriver` to embed
 in a session you manage.
 
@@ -1081,8 +1162,9 @@ An element outside any control or component has `platform_signal: null`. The run
 Limits, stated plainly: the signal is recorded on the element and its fingerprint, but the healer's
 scorer does not weight it. The SAP adapter was checked by hand against a real OpenUI5 runtime; the
 suite checks both adapters against stubs shaped like the real APIs, since real SAPUI5 and Salesforce
-orgs are not something a test-suite can load. The Salesforce adapter has not been run against a real
-org. Custom adapters (`healix.platform_adapters.PlatformAdapter`, two snippets of JavaScript) must be
+orgs are not something a test-suite can load. **The Salesforce adapter has not been run against a real
+org, so it is not claimed as supported.** [Checking it against yours](#checking-the-salesforce-adapter-against-your-org)
+takes a few minutes. Custom adapters (`healix.platform_adapters.PlatformAdapter`, two snippets of JavaScript) must be
 valid JavaScript: it runs in the page next to the collector.
 
 ### Iframes, shadow DOM, and stable IDs
@@ -1544,6 +1626,11 @@ These are fixed unless explicitly reopened:
 | 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | ✅ Done |
 | — | Script generation: `ScriptGenerator`, `healix generate`, the `script_generated` event | ✅ Done |
 | 9 | Packaging (extras, `.env.example`, MIT licence, README), `healix doctor`, PyPI release | ✅ Done |
+| 10 | Release gate, opt-in Playwright quiet window, skipped-frame reporting, Firefox in CI | ✅ Done (1.1) |
+| 11 | Durable webhook delivery: an outbox, `healix flush-events`, a delivery id | ✅ Done |
+| 12 | Opt-in click-through discovery with a write guard | ✅ Done |
+| 13 | Multi-role runs and the comparison between roles | ✅ Done |
+| 14 | Validation on real sites, the locator-hit fix, release 2.0 | ✅ Done. The Salesforce adapter is still unverified against a real org |
 
 Releases go out from a version tag (`v*`) through the `release` workflow, which publishes to PyPI
 with trusted publishing. Before anything is built it checks that the tag matches the version in

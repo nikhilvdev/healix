@@ -12,7 +12,7 @@ auto-generated ``id`` or a DOM index, both of which change on every build:
     aria-label             0.10     id (raw/normalized)    0.04     classes           0.04
     parent                 0.03     sibling index          0.02
 
-Three rules decide how the signals combine:
+Three rules decide how the signals combine (and one exception, below):
 
 * A signal that is **absent on either side is neutral**, not a mismatch: a dev stripping a
   test id does not make the element a different one. A **different value** is a mismatch.
@@ -20,6 +20,22 @@ Three rules decide how the signals combine:
   evidence there was** (comparable weight against ``EVIDENCE_TARGET``). A candidate that
   can only be compared on one or two weak signals cannot score high, however well they match.
 * Candidates must have the fingerprint's tag.
+
+**The exception: a locator that hits the element it was recorded from.** Damping keeps a *search*
+honest: among many candidates, a weak coincidence on one signal must not win. It also means an
+element with little to identify it (an image-only link, an icon button: no text, label, name or
+test id) can never reach the threshold, even when it is exactly the element that was recorded, and a
+page that has not changed at all would fail. So when a primary locator (a css or xpath selector)
+resolves to a single element, ``locator_hit_holds`` accepts it when the live element gives
+**everything the fingerprint has to offer** (nothing it recorded has gone missing) and **all of it
+agrees** (``raw`` at least ``LOCATOR_AGREEMENT``, and never below the caller's threshold). An
+element that has lost the test id, name or text it was recorded with is *not* accepted this way,
+however well the rest agrees: that is a weak match, and damping rejects it as before. Any
+difference in what the element *says* (its href, text, label, class, type…) makes ``raw`` fall and
+the hit is rejected. What this cannot catch is a look-alike that differs in nothing Healix can
+see: a fingerprint with nothing but position and a few attributes to go on trusts its recorded
+position, because otherwise the element could never be found again even on a page that has not
+changed. It applies only to verifying a locator's hit, never to choosing among candidates.
 
 ``LOCATOR_PRIORITY`` is the order primary locators are tried in before any scoring happens
 (``Fingerprint.locators`` yields them in this order; a test keeps the two in step).
@@ -55,6 +71,12 @@ TRUSTED_STRATEGIES = ("stable_attr", "id", "name", "aria_label")
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_AMBIGUITY_MARGIN = 0.05
 EVIDENCE_TARGET = 0.5
+
+# How completely the comparable signals must agree, and how much a fingerprint must have to offer,
+# for a locator's hit to count as the recorded element when damping alone would reject it.
+# ``MIN_LOCATOR_EVIDENCE`` is on the same 0..1 scale as ``Score.evidence``.
+LOCATOR_AGREEMENT = 0.9
+MIN_LOCATOR_EVIDENCE = 0.2
 
 WEIGHTS: dict[str, float] = {
     "stable_attr": 0.25,
@@ -302,6 +324,39 @@ def score_candidate(fingerprint: Fingerprint, element: Element) -> Score:
     raw = sum(s.weight * (s.similarity or 0.0) for s in comparable) / weight
     evidence = min(1.0, weight / EVIDENCE_TARGET)
     return Score(element, round(raw * evidence, 4), round(raw, 4), round(evidence, 4), signals)
+
+
+def _as_element(fingerprint: Fingerprint) -> Element:
+    """The fingerprint as the element it was taken from (what it offers to compare)."""
+    return Element(
+        tag=fingerprint.tag or "",
+        id=fingerprint.id,
+        id_normalized=fingerprint.id_normalized,
+        name=fingerprint.name,
+        classes=list(fingerprint.classes),
+        attributes=dict(fingerprint.attributes),
+        text_content=fingerprint.text_content,
+        xpath=fingerprint.xpath,
+        css_selector=fingerprint.css_selector,
+        iframe_path=list(fingerprint.iframe_path),
+        dom_context=dict(fingerprint.dom_context),
+        shadow_path=list(fingerprint.shadow_path),
+    )
+
+
+def locator_hit_holds(fingerprint: Fingerprint, score: Score, threshold: float) -> bool:
+    """Whether the one element a primary locator found is the recorded one, whatever damping says.
+
+    ``True`` when the live element provides every signal the fingerprint has to offer, they agree
+    almost completely (never below ``threshold``, so a caller who asks for a stricter match still
+    gets one), and the fingerprint had enough to compare at all. See the module docstring.
+    """
+    offered = score_candidate(fingerprint, _as_element(fingerprint)).evidence
+    return (
+        offered >= MIN_LOCATOR_EVIDENCE
+        and score.evidence >= offered - 1e-9
+        and score.raw >= max(LOCATOR_AGREEMENT, threshold)
+    )
 
 
 def rank_candidates(fingerprint: Fingerprint, elements: Sequence[Element]) -> list[Score]:
