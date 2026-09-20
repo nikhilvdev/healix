@@ -352,8 +352,8 @@ from healix import Crawler, Extractor
 
 | | |
 |---|---|
-| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
-| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
+| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
 | `ScriptGenerator(source, *, base_dir=None, fingerprint_db=None, record_fingerprints=True, max_elements_per_page=200, on_event=None, webhook_url=None, ...)` | `.to_playwright(style="pom")` / `.to_selenium(style="pom")` / `.generate(backend, style)` build a script and return a `GeneratedScript` — see [Script generation](#script-generation) |
 | `Healer(store=None, *, driver=None, threshold=0.5, ambiguity_margin=0.05, run_id=None, on_event=None, webhook_url=None, ...)` | Records fingerprints and finds elements again after the page changes — see [Self-healing](#self-healing) |
 
@@ -390,14 +390,15 @@ to resume it, or choose another output path.
 
 ```bash
 healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only]
-               [--webhook-url URL] [--headed] [--no-login] [--fingerprint-db PATH]
-               [--json] [--log-level LEVEL]
+               [--webhook-url URL [--webhook-outbox PATH]] [--headed] [--no-login]
+               [--fingerprint-db PATH] [--json] [--log-level LEVEL]
 healix extract --manifest output/manifest.json [--config run_config.json]
-               [--webhook-url URL] [--headed] [--no-login] [--fingerprint-db PATH]
-               [--json] [--log-level LEVEL]
+               [--webhook-url URL [--webhook-outbox PATH]] [--headed] [--no-login]
+               [--fingerprint-db PATH] [--json] [--log-level LEVEL]
 healix generate --input output/manifest.json [--backend playwright|selenium]
                [--style pom|test|action] [--output DIR] [--fingerprint-db PATH] [--no-record]
-               [--webhook-url URL] [--json] [--log-level LEVEL]
+               [--webhook-url URL [--webhook-outbox PATH]] [--json] [--log-level LEVEL]
+healix flush-events --outbox PATH --webhook-url URL [--timeout SECONDS] [--retry-rejected] [--json]
 healix doctor [--launch] [--json]
 healix --version          # also: python -m healix
 ```
@@ -408,6 +409,8 @@ healix --version          # also: python -m healix
   the way to retry failed pages. Output goes beside the manifest unless `--config` says otherwise.
 - `--webhook-url` posts every event to that URL; see [Webhooks](#webhooks). The CLI goes through
   the SDK, so the events are exactly what `on_event` receives.
+- `--webhook-outbox PATH` makes webhook delivery durable and needs `--webhook-url`;
+  `flush-events` sends what a run left in it. Both are described under [Durable delivery](#durable-delivery).
 - `--json` prints the run summary as one JSON line on stdout instead of the human text. Logs go to
   stderr (JSON lines, `WARN` and above by default; `--log-level` changes it).
 - `--no-login` turns automatic login off.
@@ -487,7 +490,7 @@ and `screenshot_ref` is a path relative to the output directory, or `null`.
 `--webhook-url` (or `webhook_url=`) POSTs each event's JSON, in order, from a background thread — a
 slow endpoint never stalls the crawl.
 
-- Headers: `Content-Type: application/json`, `X-Healix-Event: <event type>`, `User-Agent: healix/<version>`.
+- Headers: `Content-Type: application/json`, `X-Healix-Event: <event type>`, `X-Healix-Delivery: <id>`, `User-Agent: healix/<version>`. The delivery id is the same for every attempt at one event, so a receiver that sees an event twice can tell. It is a header and not part of the payload, which stays identical to what `on_event` receives.
 - **Signing.** If `HEALIX_WEBHOOK_SECRET` is set (or `webhook_secret=` passed), each request also
   carries `X-Healix-Signature: sha256=<hex>`, the HMAC-SHA256 of the raw request body. Verify it
   before trusting a payload:
@@ -505,9 +508,47 @@ slow endpoint never stalls the crawl.
   exponential backoff; other 4xx responses are not (the receiver said no). A delivery that finally
   fails is logged and skipped — it never fails the crawl.
 - **Not logged.** The URL (webhook URLs often embed tokens) is never logged, only its host.
-- Delivery is best-effort: events are queued in memory (up to 1000) and flushed when the run ends.
-  It is not a durable queue — if you can't afford to miss an event, treat the manifest as the source
-  of truth.
+- **By default delivery is best-effort:** events are queued in memory (up to 1000) and flushed when
+  the run ends. An event that cannot be delivered is logged and dropped. If you can't afford to
+  miss one, turn on durable delivery below, or treat the manifest as the source of truth.
+
+#### Durable delivery
+
+Add `--webhook-outbox PATH` (or `webhook_outbox=` on `Crawler`, `Extractor`, `Healer` and
+`ScriptGenerator`) and every event is written to a SQLite file before it is sent, and removed only
+once the receiver has accepted it:
+
+```bash
+healix crawl --config run_config.json --webhook-url https://hooks.example.com/healix \
+             --webhook-outbox events.db
+```
+
+- **A receiver that goes down mid-run does not lose anything.** The events wait in the file, the
+  sender keeps retrying (2 s, then longer, up to 60 s between rounds), and when the receiver
+  returns they are delivered, oldest first. The crawl is not slowed down or failed by the outage.
+- **In order.** A failing event is retried before any later one is sent, so the receiver sees events
+  in the order they were emitted.
+- **What is left when the run ends stays in the file.** At exit, Healix makes one last attempt, then
+  says on stderr how many events are still waiting. They are sent first by the next run that opens
+  the same outbox, or on demand:
+
+  ```bash
+  healix flush-events --outbox events.db --webhook-url https://hooks.example.com/healix
+  ```
+
+  `flush-events` exits `0` when the outbox is empty, `1` when events are still waiting (the receiver
+  could not be reached within `--timeout`, default 60 s) and `3` when the receiver rejected some.
+  It signs with `HEALIX_WEBHOOK_SECRET`, like a run.
+- **At least once, not exactly once.** If the receiver processes an event but its answer never
+  arrives, the event is sent again. Every attempt carries the same `X-Healix-Delivery` id: drop a
+  delivery whose id you have already handled. Exactly-once is not possible over HTTP.
+- **A receiver that says no does not block the rest.** A 4xx answer other than 408 and 429 means
+  the receiver rejected that event. It is set aside in the file (never sent again unless you pass
+  `--retry-rejected` to `flush-events`) and the next event goes out.
+- **One sender per outbox file.** Two processes draining the same file at once would send events
+  twice. Use one outbox per receiver.
+- **The file is private to you** (mode `0600`): it holds page URLs and output paths. The signing
+  secret and the webhook URL are never stored in it.
 
 ## Authentication
 
@@ -1291,7 +1332,8 @@ These are fixed unless explicitly reopened:
   changing; it is off by default on Playwright, and it cannot see a request still in flight.
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
-- **Webhook delivery is best-effort**, not durable — see [Webhooks](#webhooks).
+- **Webhook delivery is best-effort by default**; `--webhook-outbox` makes it durable and
+  at-least-once (not exactly-once) — see [Durable delivery](#durable-delivery).
 - **Generated scripts need Healix at runtime** — that is what makes them self-healing — and do not
   log in by themselves. See [Script generation](#script-generation) for what they do and do not do.
 - **Healing is not a substitute for a test.** A healed element is *probably* the same one; it can be

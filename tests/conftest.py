@@ -123,7 +123,8 @@ def captured_logs():
 class WebhookReceiver:
     """A local HTTP endpoint that records every POST and answers with scripted statuses."""
 
-    def __init__(self):
+    def __init__(self, port: int = 0):
+        """``port`` 0 picks a free one; an old receiver's port brings it back after a stop."""
         self.requests: list[dict] = []
         self._statuses: list[int] = []
         receiver = self
@@ -142,9 +143,10 @@ class WebhookReceiver:
             def log_message(self, *args):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/hook"
+        self.port = self.server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}/hook"
 
     def respond_with(self, *statuses: int) -> None:
         """Statuses for the next requests, in order; after they run out the answer is 200."""

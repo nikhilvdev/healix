@@ -99,13 +99,15 @@ def test_missing_or_bad_arguments_exit_with_usage_error(argv, capsys):
 def test_crawl_passes_every_option_to_the_sdk(config_file):
     code = cli.main(
         ["crawl", "--config", str(config_file), "--output", "elsewhere", "--run-id", "r9",
-         "--webhook-url", "https://hooks.example/x", "--headed", "--no-login"]
+         "--webhook-url", "https://hooks.example/x", "--webhook-outbox", "events.db",
+         "--headed", "--no-login"]
     )  # fmt: skip
     [crawler] = FakeCrawler.instances
     assert code == 0 and crawler.calls == ["discover_and_extract"]
     assert crawler.kwargs == {
         "run_id": "r9",
         "webhook_url": "https://hooks.example/x",
+        "webhook_outbox": "events.db",
         "headless": False,
         "auto_login": False,
         "fingerprint_store": None,
@@ -119,6 +121,7 @@ def test_crawl_defaults_are_headless_and_use_the_configured_output(config_file):
     assert crawler.kwargs == {
         "run_id": None,
         "webhook_url": None,
+        "webhook_outbox": None,
         "headless": True,
         "auto_login": True,
         "fingerprint_store": None,
@@ -296,3 +299,21 @@ def test_fingerprint_db_is_passed_to_the_sdk_for_crawl_and_extract(config_file):
     FakeCrawler.instances.clear()
     cli.main(["extract", "--manifest", "m.json", "--fingerprint-db", "other.db"])
     assert FakeCrawler.instances[0].kwargs["fingerprint_store"] == "other.db"
+
+
+def test_a_crawl_says_what_it_left_in_the_webhook_outbox(config_file, capsys):
+    from healix.events import Outbox
+
+    outbox = Outbox(config_file.parent / "events.db")
+    outbox.add("page_discovered", "run-7", b"{}")
+    outbox.close()
+    code = cli.main(
+        [
+            "crawl", "--config", str(config_file), "--webhook-url", "https://h.example/x",
+            "--webhook-outbox", "events.db",
+        ]
+    )  # fmt: skip
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "1 webhook event(s) could not be delivered" in err
+    assert "healix flush-events --outbox events.db" in err

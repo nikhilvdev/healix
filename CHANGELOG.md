@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+Durable webhook delivery. It is opt-in: without `webhook_outbox` / `--webhook-outbox`, delivery is
+best-effort exactly as before.
+
+### Added
+- **`webhook_outbox=`** on `Crawler`, `Extractor`, `Healer` and `ScriptGenerator`, and
+  **`--webhook-outbox PATH`** on `crawl`, `extract` and `generate`. Every event is written to a SQLite
+  file before it is sent and removed only once the receiver accepts it, so a receiver that goes down
+  mid-run, or is still down when the run ends, loses nothing. Events are delivered oldest first; a
+  failing event is retried before any later one is sent; a receiver that rejects an event (a 4xx
+  other than 408 and 429) has that one set aside and the rest go out. What a run leaves in the file
+  is sent first by the next run that opens it.
+- **`healix flush-events --outbox PATH --webhook-url URL`** sends what is waiting, with `--timeout`,
+  `--retry-rejected` and `--json`. It exits `0` when the outbox is empty, `1` when events are still
+  waiting and `3` when the receiver rejected some.
+- **`X-Healix-Delivery`** header on every webhook request: an id that is the same for every attempt at
+  one event, so a receiver can drop a repeat. It is a header, so the payload is unchanged and still
+  identical to what `on_event` receives.
+- `healix.events`: `DurableWebhookSender`, `Outbox`, `OutboxError`, `open_sender`, `EventSender`.
+
+### Notes
+- Durable delivery is at least once, not exactly once, and expects one sender per outbox file.
+- After a run, a note on stderr says how many events are still waiting in the outbox.
+
 ## 1.1.0 — 2026-09-20
 
 Existing configs, manifests, event payloads and generated scripts keep working, and every new

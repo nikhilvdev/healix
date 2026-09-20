@@ -44,7 +44,8 @@ from healix.events import (
     SCRIPT_GENERATED,
     EventCallback,
     EventEmitter,
-    WebhookSender,
+    open_sender,
+    validate_outbox,
     validate_webhook_url,
 )
 from healix.fs import write_text_atomic
@@ -317,6 +318,7 @@ class ScriptGenerator:
         on_event: EventCallback | None = None,
         webhook_url: str | None = None,
         webhook_secret: str | None = None,
+        webhook_outbox: str | os.PathLike[str] | None = None,
     ) -> None:
         if max_elements_per_page < 1:
             raise GenerationError("max_elements_per_page must be at least 1")
@@ -328,6 +330,7 @@ class ScriptGenerator:
         self.on_event = on_event
         self.webhook_url = validate_webhook_url(webhook_url) if webhook_url else None
         self.webhook_secret = webhook_secret or os.environ.get("HEALIX_WEBHOOK_SECRET") or None
+        self.webhook_outbox = validate_outbox(self.webhook_url, webhook_outbox)
 
     @staticmethod
     def _resolve(
@@ -571,7 +574,9 @@ class ScriptGenerator:
     def _emit(self, script: GeneratedScript) -> None:
         sender = None
         if self.webhook_url:
-            sender = WebhookSender(self.webhook_url, secret=self.webhook_secret)
+            sender = open_sender(
+                self.webhook_url, secret=self.webhook_secret, outbox=self.webhook_outbox
+            )
         try:
             EventEmitter(self.run_id, on_event=self.on_event, sender=sender).emit(
                 SCRIPT_GENERATED,

@@ -139,3 +139,15 @@ def test_urls_must_be_absolute_http(bad):
 def test_max_attempts_must_be_positive():
     with pytest.raises(ValueError):
         WebhookSender("http://127.0.0.1:1/x", max_attempts=0)
+
+
+def test_every_delivery_has_an_id_that_stays_the_same_across_its_retries(webhook_receiver):
+    webhook_receiver.respond_with(500, 500, 200)
+    with sender(webhook_receiver.url) as hook:
+        hook.send(event(1))
+        hook.send(event(2))
+    ids = [r["headers"]["X-Healix-Delivery"] for r in webhook_receiver.requests]
+    assert len(ids) == 4
+    assert len(set(ids[:3])) == 1  # three attempts at the first event, one id
+    assert ids[3] != ids[0]  # the second event is a different delivery
+    assert len(ids[0]) == 32

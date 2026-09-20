@@ -7,7 +7,7 @@ import pytest
 from healix import Crawler, Extractor, RunConflictError
 from healix.discovery.manifest import EXTRACTED, PENDING, Manifest
 from healix.driver.factory import BackendUnavailableError
-from healix.events import EVENT_DATA_FIELDS
+from healix.events import EVENT_DATA_FIELDS, Outbox
 from tests.fakes import FakeSiteDriver, Interrupt, small_site
 
 
@@ -246,6 +246,34 @@ def test_the_run_config_decides_how_long_a_page_must_be_quiet(tmp_path, monkeypa
     slow["crawl"]["extraction"].update(settle_quiet_ms=1500, output_path=str(tmp_path / "slow"))
     Crawler(slow).discover()
     assert seen == [None, 1500]
+
+
+def test_with_an_outbox_the_webhook_gets_the_same_payloads_and_nothing_is_left_behind(
+    tmp_path, webhook_receiver
+):
+    outbox = tmp_path / "events.db"
+    _, _, events, _ = run_crawl(tmp_path, webhook_url=webhook_receiver.url, webhook_outbox=outbox)
+    assert webhook_receiver.payloads == events
+    assert Outbox(outbox).counts() == {"pending": 0, "dead": 0}
+
+
+def test_a_receiver_that_is_down_does_not_fail_the_run_and_its_events_wait_in_the_outbox(
+    tmp_path,
+):
+    outbox = tmp_path / "events.db"
+    _, run, events, _ = run_crawl(
+        tmp_path, webhook_url="http://127.0.0.1:1/hook", webhook_outbox=outbox
+    )
+    assert run.pages_extracted == 3  # the crawl went on regardless
+    waiting = Outbox(outbox)
+    assert waiting.counts()["pending"] == len(events)
+    assert json.loads(waiting.next_pending().body) == events[0]  # the first event, first in line
+
+
+@pytest.mark.parametrize("cls", [Crawler, Extractor])
+def test_an_outbox_without_a_webhook_url_is_a_configuration_error(tmp_path, cls):
+    with pytest.raises(ValueError, match="webhook_url"):
+        cls(config(tmp_path), webhook_outbox=tmp_path / "events.db")
 
 
 def test_an_invalid_webhook_url_fails_at_construction(tmp_path):

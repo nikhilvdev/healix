@@ -78,7 +78,7 @@ one is a new decision, not a refactor.
 flowchart LR
     subgraph consumers["Consumers"]
         SDK["Python SDK<br/>Crawler, Extractor,<br/>Healer, ScriptGenerator"]
-        CLI["CLI<br/>crawl, extract,<br/>generate, doctor"]
+        CLI["CLI<br/>crawl, extract, generate,<br/>doctor, flush-events"]
         HOOK["Webhook receiver"]
     end
 
@@ -86,7 +86,7 @@ flowchart LR
         PIPE["Crawl pipeline<br/>discovery, classification,<br/>login, extraction"]
         HEAL["Self-healing<br/>fingerprints, scorer,<br/>resolver, history"]
         GEN["Script generation<br/>Jinja2 templates"]
-        EV["Events<br/>schema, emitter, webhook"]
+        EV["Events<br/>schema, emitter,<br/>webhook, outbox"]
         DRV["Driver interface"]
     end
 
@@ -199,7 +199,8 @@ rest by tests of the behaviour they describe and by review:
 | `generation/templates/` | `pom.j2`, `test.j2`, `action.j2`, shared `_imports.j2`, `_session.j2`. |
 | `events/schema.py` | Event types, `EVENT_DATA_FIELDS`, `Event`, `make_event`. |
 | `events/emitter.py` | `EventEmitter`: one payload to every sink. |
-| `events/webhook.py` | `WebhookSender`: background delivery, HMAC signing, retries. |
+| `events/webhook.py` | `WebhookSender` (best-effort, in memory), and `post_with_retries`: one signed POST with retries, shared by both senders. |
+| `events/outbox.py` | `Outbox` (the SQLite file), `DurableWebhookSender`, `open_sender`. Opt-in durable delivery. |
 | `log.py` | logquill-based logging. |
 | `ids.py` | `normalize_id`. |
 | `fs.py`, `timeutil.py` | Atomic file writes; UTC timestamps. |
@@ -706,7 +707,7 @@ All three share one event schema and one code path.
 
 | Class | Purpose |
 |---|---|
-| `Crawler(config, *, run_id, on_event, webhook_url, driver, credentials, auto_login, fingerprint_store, …)` | `.discover()`, `.discover_and_extract()` → `Run` |
+| `Crawler(config, *, run_id, on_event, webhook_url, webhook_outbox, driver, credentials, auto_login, fingerprint_store, …)` | `.discover()`, `.discover_and_extract()` → `Run` |
 | `Extractor(config=None, …)` | `.extract(manifest)` over an existing manifest, resumably |
 | `Healer(store, *, driver, backend, threshold, ambiguity_margin, on_event, …)` | record fingerprints; resolve / click / write with healing; history |
 | `ScriptGenerator(source, *, base_dir, fingerprint_db, …)` | `.to_playwright(style)`, `.to_selenium(style)`, `.generate(backend, style)` |
@@ -735,10 +736,13 @@ Exception           HealingError
 
 ```
 healix crawl    --config C [--output DIR] [--run-id ID] [--discover-only] [--webhook-url U]
-                [--headed] [--no-login] [--fingerprint-db P] [--json] [--log-level L]
+                [--webhook-outbox P] [--headed] [--no-login] [--fingerprint-db P] [--json]
+                [--log-level L]
 healix extract  --manifest M [--config C] [same flags]
 healix generate --input M [--backend playwright|selenium] [--style pom|test|action]
-                [--output DIR] [--fingerprint-db P] [--no-record] [--webhook-url U] [--json]
+                [--output DIR] [--fingerprint-db P] [--no-record] [--webhook-url U]
+                [--webhook-outbox P] [--json]
+healix flush-events --outbox P --webhook-url U [--timeout S] [--retry-rejected] [--json]
 healix doctor   [--launch] [--json]
 ```
 
@@ -772,10 +776,38 @@ more, no fewer; `make_event` validates this and rejects unknown types and extra 
 
 **Delivery.** `EventEmitter` builds one validated payload and hands it to each sink. A failing
 `on_event` callback is logged and swallowed. `WebhookSender` POSTs from a **single background thread
-in order**, so a slow endpoint never stalls a crawl; it sends `X-Healix-Event` and, if a secret is set
-(`HEALIX_WEBHOOK_SECRET`), `X-Healix-Signature: sha256=<HMAC of the body>`. Network errors, timeouts,
-5xx, 408 and 429 are retried with exponential backoff; other 4xx are not. The URL is validated, never
-logged (only its host), and delivery is **best-effort**, not durable.
+in order**, so a slow endpoint never stalls a crawl; it sends `X-Healix-Event`, `X-Healix-Delivery` (an
+id that is the same for every attempt at one event, and lives in a header so the payload stays
+identical to what `on_event` gets) and, if a secret is set (`HEALIX_WEBHOOK_SECRET`),
+`X-Healix-Signature: sha256=<HMAC of the body>`. Network errors, timeouts, 5xx, 408 and 429 are
+retried with exponential backoff; other 4xx are not. The URL is validated and never logged (only its
+host). By default delivery is **best-effort**: a queue in memory, and an event that cannot be delivered
+is logged and dropped.
+
+**Durable delivery** (`events/outbox.py`, opt-in with `webhook_outbox=` / `--webhook-outbox`).
+`DurableWebhookSender` has the same `send` / `close` surface, so `EventEmitter` does not know which it
+has (`EventSender` is the protocol; `open_sender` chooses). `send` writes the event to a SQLite file
+before anything is attempted and returns; the worker thread delivers the oldest pending row through the
+same `post_with_retries`, and deletes the row only once the receiver has accepted it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: send() stores it
+    pending --> [*]: accepted (2xx): row deleted
+    pending --> pending: down, 5xx, 408, 429, timeout: retry the same event, nothing after it is sent
+    pending --> dead: rejected (other 4xx): kept, next event goes
+    dead --> pending: flush-events --retry-rejected
+```
+
+- **Order is the row order.** A failure is retried before anything later is sent, with a longer wait
+  each round (2 s doubling to 60 s), interrupted at once by `close`. At `close` one last attempt is made
+  and the rest stays in the file for the next sender on it, or for `healix flush-events`.
+- **At least once.** The row is deleted after the answer, so a crash in between means a second
+  delivery, with the same delivery id. Exactly-once is not possible over HTTP and is not claimed.
+- **A 4xx does not block.** Only a receiver that is unavailable holds the queue; one that rejects an
+  event sets that one aside.
+- **One sender per file** (no cross-process lock). The file holds payloads, so it is created `0600`; the
+  webhook URL and secret are never stored. The body is stored as the exact bytes that were signed.
 
 ## 16. Configuration and secrets
 
@@ -844,7 +876,8 @@ updates every logger already handed out (logquill child loggers copy their paren
 creation). Never stdlib `logging` or `print` in library code; never log secrets.
 
 **Concurrency.** Deliberately minimal. The pipeline is single-threaded and sequential. The only
-extra thread is the webhook sender (one, in-order queue). Stores guard their connection with a lock.
+extra thread is the webhook sender (one, in-order; with an outbox it reads from the SQLite file instead
+of memory, guarded by one lock). Stores guard their connection with a lock.
 Playwright's sync API allows one instance per thread, so tests that need two Playwright drivers open
 them one after another.
 
@@ -967,7 +1000,8 @@ Documented rather than hidden; each is also in the README.
 - **Login covers common shapes only**: no CAPTCHA, passkeys, hardware keys, pop-up-window or
   cross-origin-iframe logins; MFA aborts.
 - **One credential per run.** No multi-role crawling or diffing.
-- **Webhook delivery is best-effort.**
+- **Webhook delivery is best-effort by default.** With an outbox it is durable, in order and at least
+  once (never exactly once), with one sender per file.
 - **Generated scripts** need Healix at runtime, do not log in by themselves, and check presence not
   behaviour; they were tested on fixture sites, not a large real application.
 - **The release gate has not run remotely yet.** It was tested by running its check script against

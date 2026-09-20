@@ -9,9 +9,17 @@ it also carries ``X-Healix-Signature: sha256=<hex>``, the HMAC-SHA256 of the raw
 request body, so the receiver can verify the sender. The secret belongs in the
 environment (``HEALIX_WEBHOOK_SECRET``), never in the run config.
 
+Every request also carries ``X-Healix-Delivery``, an id that is the same for every attempt at the
+same event, so a receiver that sees an event twice can tell. It is a header and not part of the
+payload, which is the same dict ``on_event`` receives.
+
 Retries: network errors, timeouts, HTTP 5xx, 408 and 429 are retried with
 exponential backoff; other 4xx responses are not (the receiver has said no).
 The URL is never logged — webhook URLs often embed tokens — only its host.
+
+This sender is best-effort: events wait in memory, and one that cannot be delivered is logged
+and dropped. For delivery that survives an outage and a restart, use the durable sender
+(``healix.events.outbox``); ``open_sender`` picks between them.
 """
 
 from __future__ import annotations
@@ -25,7 +33,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -36,6 +46,11 @@ logger = get_logger(__name__)
 
 _STOP = object()
 _RETRYABLE_STATUSES = frozenset({408, 429})
+
+# How an attempt to deliver one event ended.
+DELIVERED = "delivered"
+RETRY = "retry"  # it did not get through, and might if tried again later
+REJECTED = "rejected"  # the receiver said no; sending it again will not change that
 
 
 def sign_body(secret: str, body: bytes) -> str:
@@ -49,6 +64,61 @@ def validate_webhook_url(url: str) -> str:
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError("webhook URL must be an absolute http(s) URL")
     return url
+
+
+def encode_payload(payload: dict[str, Any]) -> bytes:
+    """The exact request body for ``payload``. The signature is computed over these bytes."""
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """How ``post_with_retries`` ended: ``DELIVERED``, ``RETRY`` or ``REJECTED``."""
+
+    status: str
+    attempts: int
+    error: str | None = None
+
+
+def post_with_retries(
+    url: str,
+    body: bytes,
+    event: str,
+    *,
+    delivery_id: str,
+    secret: str | None = None,
+    timeout: float = 5.0,
+    max_attempts: int = 3,
+    backoff: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Outcome:
+    """POST ``body`` to ``url``, retrying what is worth retrying, and say how it ended."""
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"healix/{__version__}",
+        "X-Healix-Event": event,
+        "X-Healix-Delivery": delivery_id,
+    }
+    if secret:
+        headers["X-Healix-Signature"] = sign_body(secret, body)
+    error = "unknown"
+    status = RETRY
+    attempt = 0
+    for attempt in range(1, max_attempts + 1):
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as resp:
+                resp.read()
+            return Outcome(DELIVERED, attempt)
+        except urllib.error.HTTPError as exc:
+            error = f"HTTP {exc.code}"
+            if exc.code < 500 and exc.code not in _RETRYABLE_STATUSES:
+                return Outcome(REJECTED, attempt, error)  # retrying won't change the answer
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            error = f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}"
+        if attempt < max_attempts:
+            sleep(backoff * 2 ** (attempt - 1))
+    return Outcome(status, attempt, error)
 
 
 class WebhookSender:
@@ -136,38 +206,26 @@ class WebhookSender:
                 self.failed += 1
                 logger.error("unexpected webhook error", host=self._host, error=str(exc))
 
-    def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
-        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": f"healix/{__version__}",
-            "X-Healix-Event": str(payload.get("event", "")),
-        }
-        if self._secret:
-            headers["X-Healix-Signature"] = sign_body(self._secret, body)
-        return urllib.request.Request(self._url, data=body, headers=headers, method="POST")
-
     def _deliver(self, payload: dict[str, Any]) -> None:
-        error = "unknown"
-        for attempt in range(1, self._max_attempts + 1):
-            try:
-                with urllib.request.urlopen(self._request(payload), timeout=self._timeout) as resp:
-                    resp.read()
-                self.delivered += 1
-                return
-            except urllib.error.HTTPError as exc:
-                error = f"HTTP {exc.code}"
-                if exc.code < 500 and exc.code not in _RETRYABLE_STATUSES:
-                    break  # the receiver rejected it; retrying won't change that
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                error = f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}"
-            if attempt < self._max_attempts:
-                self._sleep(self._backoff * 2 ** (attempt - 1))
+        outcome = post_with_retries(
+            self._url,
+            encode_payload(payload),
+            str(payload.get("event", "")),
+            delivery_id=uuid.uuid4().hex,
+            secret=self._secret,
+            timeout=self._timeout,
+            max_attempts=self._max_attempts,
+            backoff=self._backoff,
+            sleep=self._sleep,
+        )
+        if outcome.status == DELIVERED:
+            self.delivered += 1
+            return
         self.failed += 1
         logger.warn(
             "webhook delivery failed",
             host=self._host,
             event=payload.get("event"),
-            attempts=attempt,
-            error=error,
+            attempts=outcome.attempts,
+            error=outcome.error,
         )

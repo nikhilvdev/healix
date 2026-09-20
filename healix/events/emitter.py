@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from healix.events.schema import make_event
-from healix.events.webhook import WebhookSender
 from healix.log import get_logger
 from healix.timeutil import utc_now
 
 logger = get_logger(__name__)
 
 EventCallback = Callable[[dict[str, Any]], None]
+
+
+class EventSender(Protocol):
+    """Where an emitter's webhook events go: ``WebhookSender`` or ``DurableWebhookSender``."""
+
+    def send(self, payload: dict[str, Any]) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class EventEmitter:
@@ -29,7 +36,7 @@ class EventEmitter:
         run_id: str,
         *,
         on_event: EventCallback | None = None,
-        sender: WebhookSender | None = None,
+        sender: EventSender | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.run_id = run_id

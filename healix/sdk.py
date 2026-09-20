@@ -53,7 +53,8 @@ from healix.events import (
     RUN_COMPLETE,
     EventCallback,
     EventEmitter,
-    WebhookSender,
+    open_sender,
+    validate_outbox,
     validate_webhook_url,
 )
 from healix.extraction import ElementExtractor, ExtractedPage
@@ -144,6 +145,7 @@ class _Runner:
         on_event: EventCallback | None,
         webhook_url: str | None,
         webhook_secret: str | None,
+        webhook_outbox: str | os.PathLike[str] | None,
         driver: Driver | None,
         headless: bool,
         credentials: Credentials | None,
@@ -155,6 +157,7 @@ class _Runner:
         self.on_event = on_event
         self.webhook_url = validate_webhook_url(webhook_url) if webhook_url else None
         self.webhook_secret = webhook_secret or os.environ.get(WEBHOOK_SECRET_ENV) or None
+        self.webhook_outbox = validate_outbox(self.webhook_url, webhook_outbox)
         self._driver = driver
         self.headless = headless
         self.credentials = credentials
@@ -169,7 +172,9 @@ class _Runner:
         with contextlib.ExitStack() as stack:
             sender = None
             if self.webhook_url:
-                sender = WebhookSender(self.webhook_url, secret=self.webhook_secret)
+                sender = open_sender(
+                    self.webhook_url, secret=self.webhook_secret, outbox=self.webhook_outbox
+                )
                 stack.callback(sender.close)  # runs after the driver is closed
             driver = self._driver
             if driver is None:
@@ -258,6 +263,7 @@ class Crawler(_Runner):
         on_event: EventCallback | None = None,
         webhook_url: str | None = None,
         webhook_secret: str | None = None,
+        webhook_outbox: str | os.PathLike[str] | None = None,
         driver: Driver | None = None,
         headless: bool = True,
         credentials: Credentials | None = None,
@@ -271,6 +277,7 @@ class Crawler(_Runner):
             on_event=on_event,
             webhook_url=webhook_url,
             webhook_secret=webhook_secret,
+            webhook_outbox=webhook_outbox,
             driver=driver,
             headless=headless,
             credentials=credentials,
@@ -369,6 +376,7 @@ class Extractor(_Runner):
         on_event: EventCallback | None = None,
         webhook_url: str | None = None,
         webhook_secret: str | None = None,
+        webhook_outbox: str | os.PathLike[str] | None = None,
         driver: Driver | None = None,
         headless: bool = True,
         credentials: Credentials | None = None,
@@ -382,6 +390,7 @@ class Extractor(_Runner):
             on_event=on_event,
             webhook_url=webhook_url,
             webhook_secret=webhook_secret,
+            webhook_outbox=webhook_outbox,
             driver=driver,
             headless=headless,
             credentials=credentials,

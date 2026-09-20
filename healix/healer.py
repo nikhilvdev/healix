@@ -36,7 +36,8 @@ from healix.events import (
     ELEMENT_HEALED,
     EventCallback,
     EventEmitter,
-    WebhookSender,
+    open_sender,
+    validate_outbox,
     validate_webhook_url,
 )
 from healix.healing import (
@@ -83,6 +84,7 @@ class Healer:
         on_event: EventCallback | None = None,
         webhook_url: str | None = None,
         webhook_secret: str | None = None,
+        webhook_outbox: str | os.PathLike[str] | None = None,
     ) -> None:
         self._store_arg = store if store is not None else DEFAULT_DB_PATH
         self._driver_arg = driver
@@ -94,6 +96,7 @@ class Healer:
         self.on_event = on_event
         self.webhook_url = validate_webhook_url(webhook_url) if webhook_url else None
         self.webhook_secret = webhook_secret or os.environ.get(WEBHOOK_SECRET_ENV) or None
+        self.webhook_outbox = validate_outbox(self.webhook_url, webhook_outbox)
 
         self._stack: contextlib.ExitStack | None = None
         self._driver: Driver | None = None
@@ -115,7 +118,9 @@ class Healer:
                 stack.callback(store.close)
             sender = None
             if self.webhook_url:
-                sender = WebhookSender(self.webhook_url, secret=self.webhook_secret)
+                sender = open_sender(
+                    self.webhook_url, secret=self.webhook_secret, outbox=self.webhook_outbox
+                )
                 stack.callback(sender.close)
             driver = self._driver_arg
             if driver is None:
