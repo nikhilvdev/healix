@@ -14,6 +14,14 @@ PAGES = {
         "  document.body.insertAdjacentHTML('beforeend', '<p id=\"late\">' + t + '</p>'); });"
         "</script></body>"
     ),
+    # The same, but the answer is slow enough that no realistic quiet window covers it, however
+    # slow the machine running the test is.
+    "/slow": (
+        "<!doctype html><body><h1>Slow</h1><script>"
+        "fetch('/slow-data').then(r => r.text()).then(t => {"
+        "  document.body.insertAdjacentHTML('beforeend', '<p id=\"late\">' + t + '</p>'); });"
+        "</script></body>"
+    ),
     # A page that keeps making requests for as long as it is open.
     "/chatty": (
         "<!doctype html><body><h1>Chatty</h1><script>"
@@ -33,9 +41,10 @@ PAGES = {
         "<!doctype html><body><script>alert('hello');</script><p id='after'>after</p></body>"
     ),
     "/data": "ready",
+    "/slow-data": "ready",
     "/tick": "ok",
 }
-DELAYS = {"/data": 0.15}
+DELAYS = {"/data": 0.15, "/slow-data": 1.2}
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

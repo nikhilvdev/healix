@@ -94,16 +94,20 @@ def test_a_target_in_a_frame_that_does_not_exist_is_reported(selenium, dynamic):
 
 
 def test_a_slow_api_can_outlast_the_quiet_window_unless_it_is_raised(dynamic):
-    """The documented limit: a request still in flight is invisible to WebDriver."""
-    quick = make_driver("selenium", quiet_ms=50)  # shorter than the 150 ms the API takes
+    """The documented limit: a request still in flight is invisible to WebDriver.
+
+    The API takes 1.2 s, so a 50 ms quiet window misses it with about a second to spare, however
+    slow the machine is; a window longer than the API waits for it.
+    """
+    quick = make_driver("selenium", quiet_ms=50)
     try:
-        quick.navigate(dynamic + "/late")
+        quick.navigate(dynamic + "/slow")
         assert not any(e.id == "late" for e in quick.get_elements())
     finally:
         quick.close()
-    patient = make_driver("selenium", quiet_ms=1000)
+    patient = make_driver("selenium", quiet_ms=1600, settle_timeout_ms=6000)
     try:
-        patient.navigate(dynamic + "/late")
+        patient.navigate(dynamic + "/slow")
         assert any(e.id == "late" for e in patient.get_elements())
     finally:
         patient.close()
