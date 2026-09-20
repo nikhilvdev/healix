@@ -9,7 +9,7 @@ finds, extracts every element with maximum raw detail into JSON, and generates
 self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
-**Status: 1.0.** The driver abstraction (Playwright and
+**Status: 1.1.** The driver abstraction (Playwright and
 Selenium), iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
 surface are implemented and tested, and so are automatic login (username/password, SSO, session
@@ -418,7 +418,7 @@ healix --version          # also: python -m healix
 - `doctor` checks that this machine can run Healix and exits `0` if it can, `1` if it cannot:
 
   ```text
-  healix 1.0.0 doctor
+  healix 1.1.0 doctor
 
     ok    python         3.12.14
     ok    logquill       1.0.0
