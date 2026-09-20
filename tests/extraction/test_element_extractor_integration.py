@@ -1,15 +1,10 @@
-"""Discovery followed by extraction, end to end, in real Chromium."""
+"""Discovery followed by extraction, end to end, in a real browser."""
 
 import json
 
-import pytest
-
-pytest.importorskip("playwright")
-
-from healix.discovery.crawler import DiscoveryConfig, DiscoveryCrawler  # noqa: E402
-from healix.discovery.manifest import EXTRACTED, Manifest  # noqa: E402
-from healix.driver.playwright_adapter import PlaywrightDriverAdapter  # noqa: E402
-from healix.extraction import ElementExtractor, ExtractionConfig  # noqa: E402
+from healix.discovery.crawler import DiscoveryConfig, DiscoveryCrawler
+from healix.discovery.manifest import EXTRACTED, Manifest
+from healix.extraction import ElementExtractor, ExtractionConfig
 
 ELEMENT_KEYS = {
     "tag", "id", "id_normalized", "name", "classes", "attributes", "text_content", "computed",
@@ -19,17 +14,6 @@ PAGE_KEYS = {
     "schema_version", "run_id", "url", "page_type", "structural_hash", "captured_at",
     "element_counts", "elements",
 }  # fmt: skip
-
-
-@pytest.fixture(scope="module")
-def driver():
-    adapter = PlaywrightDriverAdapter()
-    try:
-        adapter.start()
-    except Exception as exc:
-        pytest.skip(f"cannot launch Chromium: {exc}")
-    yield adapter
-    adapter.close()
 
 
 def _load(out, page):

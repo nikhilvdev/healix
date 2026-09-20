@@ -4,10 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Pre-release: nothing is published to PyPI yet. The first seven milestones of the build
-plan are implemented; the Selenium adapter and script generation are not.
+Pre-release: nothing is published to PyPI yet. The first eight milestones of the build
+plan are implemented; script generation and `healix doctor` are not.
 
 ### Added
+
+- **Selenium backend.** `SeleniumDriverAdapter` (`healix.driver.selenium_adapter`), selected with
+  `"backend": "selenium"` or `Healer(backend="selenium")`; install with `healix[selenium]` (or
+  `healix[all]`). It implements the same `Driver` interface, so crawling, extraction, login and
+  healing run unmodified. Shadow roots and frames go through the same in-page scripts as Playwright,
+  so both backends extract identical elements. Because WebDriver has no network-idle or auto-wait,
+  the adapter settles pages by watching resources and elements (`quiet_ms`), retries `click` and
+  `write` while an element is not ready (`action_timeout_ms`), and raises when a browser shows an
+  error page instead of failing. Only Chrome is tested. The shadow walk is in-page rather than one
+  `getShadowRoot()` call per host.
+- **Platform adapters.** `healix.platform_adapters`: `sap_ui5` (UI5 control id, type and root flag
+  from `sap.ui.getCore().byId()`) and `salesforce_lwc` (Lightning component tag and `data-aura-*`
+  attributes) add `platform_signal` to elements, only where their platform is detected. Additive
+  only: nothing depends on them firing. `crawl.extraction.platform_detection` (`auto` / `off`) now
+  takes effect, and the manifest's `platform_detected` records the platform seen.
 
 - **Self-healing.**
   - `Healer` (`healix.Healer`): `learn` records fingerprints, `resolve` / `click` / `write` find an
@@ -204,6 +219,13 @@ plan are implemented; the Selenium adapter and script generation are not.
 
 ### Changed
 
+- `create_driver` takes a `platform_detection` keyword (`"auto"` / `"off"`), and the `selenium`
+  backend now works instead of raising "not implemented". `PlaywrightDriverAdapter` gains a
+  `platform_adapters` argument; `healix.driver.frames` builds its in-page scripts through
+  `build_collect_js` / `build_describe_js` (`COLLECT_ALL_JS` / `DESCRIBE_ONE_JS` remain).
+- The browser integration tests (discovery, extraction, classification, healing, login) and the
+  driver contract tests now run once per backend, and further tests compare Playwright and Selenium
+  side by side.
 - `Fingerprint` gains `shadow_path`, `to_dict` / `from_dict` (unknown keys ignored), `key` and
   `element_key`. `healix.healing` exports its names lazily, to avoid an import cycle with the driver.
 
@@ -232,6 +254,12 @@ plan are implemented; the Selenium adapter and script generation are not.
   (honoring `<base href>`).
 
 ### Fixed
+
+- **`PlaywrightDriverAdapter.navigate()` could fail on a good page right after a failed one.**
+  Chromium can still be committing the failed load's error page when the next navigation starts,
+  and reports "interrupted by another navigation". A crawl would then have marked the next, healthy
+  page as failed too. The navigation is now retried (up to three attempts) on that specific error;
+  a page that really fails still raises its own error at once.
 
 - **A password field's markup `value` attribute was captured verbatim** into an element's
   `attributes`. It is now recorded as `"[redacted]"`. This mattered from the moment extraction

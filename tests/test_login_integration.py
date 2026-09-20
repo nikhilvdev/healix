@@ -1,4 +1,4 @@
-"""Automatic login against a real site in real Chromium.
+"""Automatic login against a real site in a real browser.
 
 The server counts every credential submission, so "the password was sent once" is checked from
 the server's side, not just the client's.
@@ -10,22 +10,14 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("playwright")
-
-from healix import Crawler, Credentials, cli  # noqa: E402
-from healix.discovery.manifest import EXTRACTED, FAILED, Manifest  # noqa: E402
-from tests.loginsite import PASSWORD, USER, LoginSite  # noqa: E402
+from healix import Crawler, Credentials, cli
+from healix.discovery.manifest import EXTRACTED, FAILED, Manifest
+from tests.loginsite import PASSWORD, USER, LoginSite
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _browser_available():
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            p.chromium.launch().close()
-    except Exception as exc:
-        pytest.skip(f"cannot launch Chromium: {exc}")
+@pytest.fixture(autouse=True)
+def _on_every_backend(use_backend):
+    """Every test in this module runs on each browser backend."""
 
 
 @pytest.fixture

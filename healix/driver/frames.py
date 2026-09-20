@@ -5,7 +5,10 @@ Nothing here imports a browser library or knows about any vendor:
 * ``COLLECT_ALL_JS`` / ``DESCRIBE_ONE_JS`` are in-page scripts that walk the DOM,
   descending into every *open* shadow root, and describe elements in the raw
   extraction schema. Any adapter can run them (Playwright ``evaluate``,
-  Selenium ``execute_script``).
+  Selenium ``execute_script``). ``build_collect_js`` / ``build_describe_js`` make the same
+  scripts with platform adapters' hooks added (``healix.platform_adapters``).
+* ``QUERY_JS`` / ``TEXT_JS`` / ``IDS_JS`` / ``CHILD_FRAMES_JS`` are in-page queries that see
+  into open shadow roots, for backends whose native selectors do not (Selenium).
 * ``walk_frames`` builds the same-origin frame tree from adapter callbacks.
 * ``collect_elements`` runs the collector in each same-origin frame and merges
   the results, tagging every element with its ``iframe_path``.
@@ -15,12 +18,14 @@ Closed shadow roots and cross-origin frames are not reachable and are skipped.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import json
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from healix.driver.base import MAIN_FRAME, Element, Frame
 from healix.log import get_logger
+from healix.platform_adapters.base import PlatformAdapter
 
 logger = get_logger(__name__)
 
@@ -164,6 +169,17 @@ function computedState(el, root, rect) {
   };
 }
 
+// Platform adapters (healix.platform_adapters) register here, only in frames where their platform
+// is detected. A hook that throws is ignored: extraction never depends on an adapter.
+const platformHooks = [];
+function platformSignal(el) {
+  for (const hook of platformHooks) {
+    try { const signal = hook(el); if (signal) return signal; } catch (e) { /* ignored */ }
+  }
+  return null;
+}
+/*PLATFORM_HOOKS*/
+
 // Raw extraction schema for one element (iframe_path and id_normalized are added Python-side).
 function describe(el) {
   const root = el.getRootNode();
@@ -190,7 +206,7 @@ function describe(el) {
     xpath: xpathOf(el, root),
     css_selector: chain.join(' '),
     shadow_path: chain.slice(0, -1),
-    platform_signal: null,
+    platform_signal: platformSignal(el),
     dom_context: {
       parent_tag: parentEl ? parentEl.localName : null,
       parent_id: parentEl ? (parentEl.getAttribute('id') || null) : null,
@@ -212,11 +228,162 @@ function walk(node, out) {
 }
 """
 
-COLLECT_ALL_JS = "() => {" + _JS_HELPERS + "const out = []; walk(document, out); return out; }"
-"""Function expression: describes every element in the current frame's document."""
 
-DESCRIBE_ONE_JS = "(el) => {" + _JS_HELPERS + "return describe(el); }"
-"""Function expression taking one DOM element and describing it."""
+def _with_hooks(adapters: Sequence[PlatformAdapter]) -> str:
+    hooks = "".join(_hook_js(adapter) for adapter in adapters)
+    return _JS_HELPERS.replace("/*PLATFORM_HOOKS*/", hooks)
+
+
+def _hook_js(adapter: PlatformAdapter) -> str:
+    """Register ``adapter``'s signal function, but only where its detection expression is true."""
+    return (
+        f"try {{ if ({adapter.detect_js}) {{ const signalFor = {adapter.signal_js}; "
+        "platformHooks.push((el) => { const signal = signalFor(el); "
+        f"return signal ? Object.assign({{ platform: {json.dumps(adapter.name)} }}, signal) : null; }}); }} "
+        "} catch (e) { /* ignored */ }\n"
+    )
+
+
+def build_collect_js(adapters: Sequence[PlatformAdapter] = ()) -> str:
+    """Function expression: describes every element in the current frame's document."""
+    return "() => {" + _with_hooks(adapters) + "const out = []; walk(document, out); return out; }"
+
+
+def build_describe_js(adapters: Sequence[PlatformAdapter] = ()) -> str:
+    """Function expression taking one DOM element and describing it."""
+    return "(el) => {" + _with_hooks(adapters) + "return describe(el); }"
+
+
+COLLECT_ALL_JS = build_collect_js()
+"""Describes every element in the current frame's document (no platform adapters)."""
+
+DESCRIBE_ONE_JS = build_describe_js()
+"""Takes one DOM element and describes it (no platform adapters)."""
+
+
+# --------------------------------------------------------------------------- #
+# In-page queries that see into open shadow roots
+# --------------------------------------------------------------------------- #
+#
+# A backend's native selectors may stop at a shadow boundary (Selenium's do). These give it the
+# same view Playwright has: descendant combinators cross shadow roots, and every match is
+# returned in document order. Closed shadow roots are, as everywhere, out of reach.
+
+_QUERY_HELPERS = r"""
+const clean = (t) => (t || '').replace(/\s+/g, ' ').trim();
+
+// Every element, depth first in document order; a host's shadow tree comes before its light children.
+function everyElement(node, out) {
+  for (const el of node.children) {
+    out.push(el);
+    if (el.shadowRoot) everyElement(el.shadowRoot, out);
+    everyElement(el, out);
+  }
+  return out;
+}
+
+// The parent, hopping from a shadow root to its host.
+function flatParent(el) {
+  const parent = el.parentNode;
+  if (!parent) return null;
+  if (parent.nodeType === 11) return parent.host || null;
+  return parent.nodeType === 1 ? parent : null;
+}
+
+// Splits at descendant combinators (whitespace) that are outside brackets, parentheses and quotes.
+// `>`, `+` and `~` stay glued to their neighbours. A selector list (a top-level comma) is one chunk.
+function splitDescendant(selector) {
+  const chunks = [];
+  let current = '', depth = 0, quote = null;
+  for (let i = 0; i < selector.length; i++) {
+    const c = selector[i];
+    if (c === '\\') { current += c + (selector[i + 1] || ''); i++; continue; }
+    if (quote) { current += c; if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; current += c; continue; }
+    if (c === '[' || c === '(') depth++;
+    else if (c === ']' || c === ')') depth--;
+    else if (c === ',' && depth === 0) return [selector];
+    if (depth === 0 && /\s/.test(c)) {
+      let j = i;
+      while (j < selector.length && /\s/.test(selector[j])) j++;
+      const before = current.trim().slice(-1), after = selector[j];
+      if (current.trim() && j < selector.length && !'>+~'.includes(before) && !'>+~'.includes(after)) {
+        chunks.push(current.trim());
+        current = '';
+      } else {
+        current += ' ';
+      }
+      i = j - 1;
+      continue;
+    }
+    current += c;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+// Every element matching `selector`, whichever shadow root it is in. `a b` finds a `b` inside any
+// descendant of an `a`, shadow trees included. Throws on a selector the browser rejects.
+function pierceAll(selector) {
+  const chunks = splitDescendant(selector);
+  const all = everyElement(document, []);
+  let current = all.filter((el) => el.matches(chunks[0]));
+  for (let i = 1; i < chunks.length; i++) {
+    const ancestors = new Set(current);
+    current = all.filter((el) => {
+      if (!el.matches(chunks[i])) return false;
+      for (let p = flatParent(el); p; p = flatParent(p)) if (ancestors.has(p)) return true;
+      return false;
+    });
+  }
+  return current;
+}
+
+// The text runs directly inside an element (broken up by child elements) — what an exact text match
+// compares against — plus a button-type input's value.
+function ownTextRuns(el) {
+  const runs = [];
+  let run = '';
+  for (const node of el.childNodes) {
+    if (node.nodeType === 3) run += node.nodeValue;
+    else if (node.nodeType === 1) { if (run) runs.push(run); run = ''; }
+  }
+  if (run) runs.push(run);
+  if (el.localName === 'input' && /^(button|submit|reset)$/i.test(el.type)) runs.push(el.value);
+  return runs.map(clean);
+}
+"""
+
+QUERY_JS = "(selector) => {" + _QUERY_HELPERS + "return pierceAll(selector); }"
+"""Every element matching a css selector, piercing open shadow roots."""
+
+TEXT_JS = (
+    "(tag, text) => {" + _QUERY_HELPERS + "const wanted = clean(text);"
+    "return everyElement(document, []).filter((el) => (tag === '*' || el.localName === tag)"
+    " && !/^(script|style|noscript)$/.test(el.localName) && ownTextRuns(el).includes(wanted)); }"
+)
+"""Every ``tag`` element whose own text is exactly ``text`` (whitespace-normalised)."""
+
+IDS_JS = (
+    "() => {"
+    + _QUERY_HELPERS
+    + "return everyElement(document, []).filter((el) => el.hasAttribute('id'))"
+    ".map((el) => el.id); }"
+)
+"""The id of every element that has one, in document order (piercing shadow roots)."""
+
+ID_AT_JS = (
+    "(index) => {" + _QUERY_HELPERS + "return everyElement(document, [])"
+    ".filter((el) => el.hasAttribute('id'))[index] || null; }"
+)
+"""The element at ``index`` in the ``IDS_JS`` listing."""
+
+CHILD_FRAMES_JS = (
+    "() => {const out = []; (function walk(node) { for (const el of node.children) {"
+    "if (el.localName === 'iframe' || el.localName === 'frame') out.push(el);"
+    "if (el.shadowRoot) walk(el.shadowRoot); walk(el); } })(document); return out; }"
+)
+"""The ``<iframe>``/``<frame>`` elements of the current document, piercing shadow roots."""
 
 
 # --------------------------------------------------------------------------- #

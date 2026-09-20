@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.driver.backends import BACKENDS, force_backend, make_driver
+
 SITE = Path(__file__).parent / "fixtures" / "site"
 
 
@@ -232,3 +234,28 @@ def drop_healix_tables(url: str) -> None:
         conn.execute(
             "DROP TABLE IF EXISTS healix_healing_history, healix_fingerprints, healix_meta CASCADE"
         )
+
+
+# --- browser backends ------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module", params=BACKENDS)
+def backend(request):
+    """A backend name, for tests that build their own drivers. Skips if it cannot launch."""
+    make_driver(request.param).close()
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def driver(backend):
+    """One started driver per backend; every test using it runs once on each."""
+    started = make_driver(backend)
+    yield started
+    started.close()
+
+
+@pytest.fixture
+def use_backend(backend, monkeypatch):
+    """Make the SDK and ``Healer`` use ``backend``, whatever their code asks for."""
+    force_backend(monkeypatch, backend)
+    return backend

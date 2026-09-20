@@ -1,24 +1,8 @@
-"""End-to-end discovery with real Chromium against the generated crawl site."""
+"""End-to-end discovery in a real browser against the generated crawl site."""
 
-import pytest
-
-pytest.importorskip("playwright")
-
-from healix.discovery import manifest as m  # noqa: E402
-from healix.discovery.crawler import DiscoveryConfig, DiscoveryCrawler  # noqa: E402
-from healix.discovery.manifest import Manifest  # noqa: E402
-from healix.driver.playwright_adapter import PlaywrightDriverAdapter  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def driver():
-    adapter = PlaywrightDriverAdapter()
-    try:
-        adapter.start()
-    except Exception as exc:
-        pytest.skip(f"cannot launch Chromium: {exc}")
-    yield adapter
-    adapter.close()
+from healix.discovery import manifest as m
+from healix.discovery.crawler import DiscoveryConfig, DiscoveryCrawler
+from healix.discovery.manifest import Manifest
 
 
 def test_discovers_the_whole_reachable_site(driver, crawl_site_url, tmp_path):

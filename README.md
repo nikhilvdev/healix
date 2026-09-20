@@ -9,20 +9,25 @@ finds, extracts every element with maximum raw detail into JSON, and generates
 self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
-**Status: pre-release, under active development.** The driver abstraction (Playwright),
-iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
+**Status: pre-release, under active development.** The driver abstraction (Playwright and
+Selenium), iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
 surface are implemented and tested, and so are automatic login (username/password, SSO, session
-expiry) and self-healing (weighted, threshold-gated, persisted, audited). The Selenium adapter and
-script generation are **not built yet** — see the [Roadmap](#roadmap) and `CHANGELOG.md`. Nothing
-is published to PyPI yet.
+expiry), self-healing (weighted, threshold-gated, persisted, audited) and the optional SAP UI5 and
+Salesforce platform adapters. Script generation and `healix doctor` are **not built yet** — see the
+[Roadmap](#roadmap) and `CHANGELOG.md`. Nothing is published to PyPI yet.
 
 ## Features
 
 Available now:
 
-- **One driver interface** — everything is written against a `Driver` ABC; only the
-  adapter module imports `playwright`. Selenium comes later against the same interface
+- **One driver interface, two backends** — everything is written against a `Driver` ABC; only the
+  adapter modules import `playwright` or `selenium`. The same crawl, extraction and healing run
+  unmodified on either, chosen with the run config's `backend` — see
+  [The `Driver` abstraction](#the-driver-abstraction)
+- **Optional platform adapters** — SAP UI5 control ids and Salesforce Lightning component tags are
+  added to elements as `platform_signal`, only ever *on top of* the generic pipeline — see
+  [Platform adapters](#platform-adapters)
 - **Maximum-detail element extraction** — tag, id, normalized id, name, classes, every
   attribute, computed state, bounding box, css selector, xpath, iframe path, shadow path,
   and DOM context, captured up front and never deferred to a second pass
@@ -47,8 +52,8 @@ Available now:
 - **Structured logging via [logquill](https://pypi.org/project/logquill/)** — JSON-line
   records with metadata instead of formatted strings; quiet by default, one call to
   reconfigure — see [Logging](#logging)
-- **One small runtime dependency** — `logquill`, which itself has none. Playwright is an
-  optional extra
+- **One small runtime dependency** — `logquill`, which itself has none. Playwright, Selenium and
+  the PostgreSQL driver are optional extras
 - **Typed throughout** — `mypy --strict` clean
 
 - **Sequential, resumable extraction (stage two)** — walks the manifest one page at a time and
@@ -73,7 +78,7 @@ Available now:
   persisted and every heal is audited as routine churn or a possible regression. It refuses rather
   than guess — see [Self-healing](#self-healing)
 
-Planned (see [Roadmap](#roadmap)): a Selenium adapter and script generation.
+Planned (see [Roadmap](#roadmap)): script generation and `healix doctor`.
 
 ## Install
 
@@ -89,8 +94,11 @@ playwright install chromium
 ```
 
 Requires Python 3.10+. This also installs the `healix` command. Runtime dependencies are
-`logquill` (logging) and `python-dotenv` (the CLI loads `.env`). Playwright is an optional extra, and
-so is `healix[postgres]` (the `psycopg` driver, only needed to keep fingerprints in PostgreSQL).
+`logquill` (logging) and `python-dotenv` (the CLI loads `.env`). The browser libraries are optional
+extras: `healix[playwright]` (the default backend; then `playwright install chromium`) and
+`healix[selenium]` (needs Chrome installed; Selenium finds the matching driver itself).
+`healix[all]` installs both and `healix[postgres]`, the `psycopg` driver only needed to keep
+fingerprints in PostgreSQL.
 
 ## Quickstart
 
@@ -185,7 +193,8 @@ with PlaywrightDriverAdapter() as driver:
 ```
 
 `find` raises `ElementNotFoundError` when no locator resolves to exactly one element. It
-does not guess — score-based healing on top of it is [planned](#roadmap).
+does not guess; repairing a fingerprint that has drifted is the job of the
+[healer](#self-healing).
 
 ### Discover every page on a site
 
@@ -313,7 +322,7 @@ One JSON file describes a crawl. It is safe to commit: it never holds secrets.
 | `base_url`, `start_url` | Absolute http(s) URLs. Guided mode needs `start_url`; autonomous needs `base_url` |
 | `crawl.discovery` | See [Discovery config](#config) |
 | `crawl.extraction` | See [Extraction config](#config-1) |
-| `backend` | `playwright` (default). `selenium` is accepted but not implemented yet — using it raises a clear error |
+| `backend` | `playwright` (default) or `selenium`. Everything else in the config means the same on both. A backend whose library is not installed raises `BackendUnavailableError` saying which extra to install |
 
 Everything is optional except the start point. Unknown keys are errors, not silently ignored, so a
 typo can't quietly change a crawl.
@@ -340,8 +349,8 @@ from healix import Crawler, Extractor
 `run.pages_failed`, `run.platform_detected`, `run.discovery_status`, `run.blocked_on_auth`,
 `run.manifest_path`, `run.summary()`.
 
-- **The browser.** Unless you pass a `driver`, the SDK launches and closes its own (Playwright,
-  headless by default). A `driver` you pass is used as-is and its lifecycle stays yours.
+- **The browser.** Unless you pass a `driver`, the SDK launches and closes its own (the config's
+  `backend`, headless by default). A `driver` you pass is used as-is and its lifecycle stays yours.
 - **`.env`.** The SDK does not read `.env`. If you keep the login credentials or
   `HEALIX_WEBHOOK_SECRET` there, call `dotenv.load_dotenv()` first, or pass `credentials=` /
   `webhook_secret=`.
@@ -350,7 +359,7 @@ from healix import Crawler, Extractor
 - **`Extractor` output location.** Given a manifest *path* and no `config`, output goes beside the
   manifest. With a `config`, it goes to `crawl.extraction.output_path`.
 - **Errors.** `ConfigError` (bad config), `RunConflictError` (see below),
-  `BackendUnavailableError` (Playwright missing, or `selenium`). All are ordinary exceptions; the
+  `BackendUnavailableError` (the backend's library is not installed). All are ordinary exceptions; the
   SDK never calls `sys.exit`.
 
 ### Resuming a run
@@ -734,10 +743,51 @@ class Driver(ABC):
 ```
 
 Extraction, discovery, healing, classification, and generation never import `playwright`
-or `selenium`; they go through `Driver`. `PlaywrightDriverAdapter` is the only adapter
-today. `navigate()` waits for the `load` event and then, best-effort, up to
-`settle_timeout_ms` (default 3000) for the network to go idle so client-rendered pages
-have content before it is read. Set it to `0` to skip that wait.
+or `selenium`; they go through `Driver`. There are two adapters, and the rest of Healix cannot tell
+them apart: `PlaywrightDriverAdapter` (the default) and `SeleniumDriverAdapter`
+(`healix.driver.selenium_adapter`, `browser="chrome"`, `"firefox"` or `"edge"`; only Chrome is
+covered by Healix's own tests). Both take `platform_adapters=` (see
+[Platform adapters](#platform-adapters)), and both accept an existing `Page` / `WebDriver` to embed
+in a session you manage.
+
+`navigate()` waits for the `load` event and then, best-effort, up to `settle_timeout_ms`
+(default 3000) for the page to go quiet so client-rendered pages have content before it is read.
+Set it to `0` to skip that wait.
+
+**Selenium differs from Playwright in three ways, and the adapter makes up for each:**
+
+| | Playwright | Selenium adapter |
+|---|---|---|
+| Waiting for the page | Network idle | No "network idle" exists in WebDriver, so it waits for `load`, then for no new resources or elements for `quiet_ms` (default 500). A request still *in flight* is invisible, so an API that answers more slowly than `quiet_ms` can be missed: raise `quiet_ms` for slow back ends |
+| Clicking and typing | Waits until the element is actionable | Retries for up to `action_timeout_ms` (default 5000) while the element is missing, covered or not yet interactable. An ambiguous selector is reported at once, never retried |
+| A page that will not load | `goto` raises | Some browsers show an error page and report success; the adapter detects it and raises, so a failed load is never read as a page |
+
+Shadow roots and frames are read by the same in-page scripts on both backends, so a page gives the
+same elements either way: the test-suite compares them, and every locator's result, side by side.
+Selenium is not asked to walk shadow roots one `getShadowRoot()` call at a time; the in-page walk is
+one round trip per frame and, like Playwright, sees open shadow roots only.
+
+### Platform adapters
+
+Thin, optional, and **additive only**. The generic pipeline — iframe traversal, shadow DOM piercing,
+stable-id normalization — always runs, whatever platform a page is built with. An adapter can only
+*add* an element's `platform_signal`; if it does not fire, or throws, extraction is unchanged.
+
+| Adapter | Fires when | `platform_signal` |
+|---|---|---|
+| `sap_ui5` | `window.sap.ui` exists | `{"platform": "sap_ui5", "control_id": "__xmlview0--saveButton", "control_type": "sap.m.Button", "is_control_root": true}` for an element inside a UI5 control, found through `sap.ui.getCore().byId()` (or `Element.getElementById()` on UI5 versions without `getCore`) |
+| `salesforce_lwc` | `$A` or `Aura` exists, or an element carries `data-aura-rendered-by` / `data-aura-class` | `{"platform": "salesforce_lwc", "component": "lightning-input", "is_component_host": false, "aura_attributes": {"data-aura-rendered-by": "1:0"}}` — the Lightning component the element belongs to (its own tag, or the shadow host that rendered it) and its `data-aura-*` attributes |
+
+An element outside any control or component has `platform_signal: null`. The run's manifest records
+`platform_detected` (the first platform that put a signal on an element). Turn it all off with
+`"platform_detection": "off"` in `crawl.extraction` or `platform_adapters=()` on a driver.
+
+Limits, stated plainly: the signal is recorded on the element and its fingerprint, but the healer's
+scorer does not weight it. The SAP adapter was checked by hand against a real OpenUI5 runtime; the
+suite checks both adapters against stubs shaped like the real APIs, since real SAPUI5 and Salesforce
+orgs are not something a test-suite can load. The Salesforce adapter has not been run against a real
+org. Custom adapters (`healix.platform_adapters.PlatformAdapter`, two snippets of JavaScript) must be
+valid JavaScript: it runs in the page next to the collector.
 
 ### Iframes, shadow DOM, and stable IDs
 
@@ -910,7 +960,7 @@ without revisiting that.
 | `output_format` | `"json"` | The only supported value today |
 | `output_path` | `"./output/"` | Where `manifest.json` and `pages/` go |
 | `iframe_traversal` | `true` | Merge same-origin frames' elements in; `false` reads the main frame only (open shadow roots are still pierced) |
-| `platform_detection` | `"auto"` | `auto` or `off`. Validated, but acts only once the platform adapters land; `platform_detected` stays `null` until then |
+| `platform_detection` | `"auto"` | `auto`: the [platform adapters](#platform-adapters) may add `platform_signal`, and the manifest records `platform_detected`. `off`: neither |
 
 ### Output layout
 
@@ -1119,7 +1169,7 @@ These are fixed unless explicitly reopened:
 | 5 | SDK (`Crawler`, `Extractor`), CLI (`crawl`, `extract`), event schema and webhooks | ✅ Done |
 | 6 | Auto-detected login with `.env` credentials, SSO, MFA abort, mid-crawl re-login | ✅ Done |
 | 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, persistent store and history | ✅ Done (SQLite and PostgreSQL stores) |
-| 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | Planned |
+| 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | ✅ Done |
 | 9 | Packaging, `healix doctor`, PyPI release | Planned |
 
 ### Still planned

@@ -173,7 +173,11 @@ class _Runner:
                 stack.callback(sender.close)  # runs after the driver is closed
             driver = self._driver
             if driver is None:
-                driver = create_driver(self.config.backend, headless=self.headless)
+                driver = create_driver(
+                    self.config.backend,
+                    headless=self.headless,
+                    platform_detection=self.config.extraction.platform_detection,
+                )
                 driver.start()
                 stack.callback(driver.close)
             store = self._fingerprint_store

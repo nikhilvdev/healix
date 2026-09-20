@@ -1,4 +1,4 @@
-"""Self-healing against a real page in real Chromium.
+"""Self-healing against a real page in a real browser.
 
 One URL serves different versions of a login page (like successive deploys). A baseline is recorded
 against ``v1``, the page changes, and the resolver must find each element again — or refuse.
@@ -6,28 +6,21 @@ against ``v1``, the page changes, and the resolver must find each element again 
 
 import pytest
 
-pytest.importorskip("playwright")
-
-from healix import (  # noqa: E402
+from healix import (
     ElementNotHealedError,
     Healer,
     SQLiteFingerprintStore,
     UnsupportedRenderingError,
 )
-from tests.healing.site import SwitchSite  # noqa: E402
+from tests.driver.backends import evaluate
+from tests.healing.site import SwitchSite
 
 USER, PASSWORD, SUBMIT = "textbox:login-username", "textbox:login-password", "button:login-submit"
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _browser_available():
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            p.chromium.launch().close()
-    except Exception as exc:
-        pytest.skip(f"cannot launch Chromium: {exc}")
+@pytest.fixture(autouse=True)
+def _on_every_backend(use_backend):
+    """Every test in this module runs on each browser backend."""
 
 
 @pytest.fixture
@@ -42,8 +35,9 @@ def db(tmp_path):
     return tmp_path / "fingerprints.db"
 
 
-def page(healer):
-    return healer.driver.page  # the Playwright page, for checking what really happened
+def page_js(healer, expression):
+    """Evaluate JavaScript in the page, to check what really happened."""
+    return evaluate(healer.driver, ["main"], expression)
 
 
 def learn_baseline(site, db):
@@ -156,7 +150,7 @@ def test_with_no_locator_left_the_best_scoring_element_is_healed_and_persisted(s
         assert result.element.id == "user-4471"  # the right field, not the password box
         assert [e["data"]["strategy_used"] for e in events] == ["weighted_score"]
         healer.write("alice", site.url, USER, navigate=False)
-        assert page(healer).evaluate("window.__typed.text") == "alice"  # and it is usable
+        assert page_js(healer, "window.__typed.text") == "alice"  # and it is usable
 
     with SQLiteFingerprintStore(db) as store:
         [record] = store.history(site.url, USER)
@@ -196,11 +190,11 @@ def test_a_heavy_refactor_is_healed_by_scoring_and_the_healed_fields_work(site, 
         assert user.strategy == "weighted_score" and pw.strategy == "weighted_score"
         assert user.element.id == "x1" and pw.element.id == "x2"  # each to the right field
         assert 0.5 <= user.confidence < 0.9  # heavy change: healed, but not with false certainty
-        assert page(healer).evaluate("window.__typed") == {
+        assert page_js(healer, "window.__typed") == {
             "text": "alice@example.com",
             "password": "hunter2",
         }
-        assert page(healer).evaluate("window.__submitted") == 1
+        assert page_js(healer, "window.__submitted") == 1
         assert {r.element_role for r in healer.history()} == {USER, PASSWORD, SUBMIT}
 
     with Healer(db) as later:  # every heal persisted

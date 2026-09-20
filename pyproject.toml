@@ -40,13 +40,16 @@ classifiers = [
 dependencies = ["logquill>=1.0", "python-dotenv>=1.0"]
 
 [project.optional-dependencies]
-# Playwright is the primary backend. A `selenium` extra (and `all`) arrives with the
-# Selenium adapter. `postgres` is only needed to keep fingerprints in PostgreSQL.
+# Playwright is the primary backend; Selenium is the alternative. `postgres` is only needed to keep
+# fingerprints in PostgreSQL.
 playwright = ["playwright>=1.40"]
+selenium = ["selenium>=4.20"]
 # Fingerprints in PostgreSQL instead of a local SQLite file.
 postgres = ["psycopg[binary]>=3.1"]
+all = ["healix[playwright,selenium,postgres]"]
 dev = [
     "playwright>=1.40",
+    "selenium>=4.20",
     "psycopg[binary]>=3.1",
     "ruff>=0.6",
     "mypy>=1.11",
@@ -63,6 +66,7 @@ docs = [
     # Renders the API reference published to GitHub Pages; not needed to use or develop healix.
     "pdoc>=16",
     "playwright>=1.40",
+    "selenium>=4.20",
 ]
 
 [project.scripts]
@@ -108,6 +112,9 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 "healix/driver/frames.py" = ["E501"]
 # The login test site is HTML written as Python strings.
 "tests/loginsite.py" = ["E501"]
+# The platform hooks are JavaScript inside Python strings, like the collector.
+"healix/platform_adapters/*.py" = ["E501"]
+"tests/platform_adapters/pages.py" = ["E501"]
 # Lazy exports: the TYPE_CHECKING block is a re-export list, not unused imports.
 "healix/healing/__init__.py" = ["F401"]
 

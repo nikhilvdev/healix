@@ -19,8 +19,11 @@ mypy
 pytest
 ```
 
-Python 3.10+ is required. The browser tests launch real headless Chromium and skip
-themselves if Playwright or its browsers aren't installed.
+Python 3.10+ is required. The browser tests launch a real headless browser and skip
+themselves if it isn't available: Chromium through Playwright, and Chrome through Selenium
+(`.[dev]` installs both libraries; Selenium finds the matching chromedriver itself, which needs
+network access the first time). Tests that use the `driver` or `backend` fixtures run once per
+backend, so a change to the driver layer is checked against both.
 The PostgreSQL store tests need a real server: set `HEALIX_TEST_POSTGRES_URL`, or have Docker
 running and they start a throwaway `postgres:16-alpine` container. CI provides one as a service.
 
@@ -55,7 +58,7 @@ raised as an issue and discussed *before* code is written.
 
 - **Everything goes through `Driver`.** Extraction, discovery, healing, classification, and
   generation must never import `playwright` or `selenium`. Only adapter modules
-  (`driver/playwright_adapter.py`, and later `driver/selenium_adapter.py`) may.
+  (`driver/playwright_adapter.py` and `driver/selenium_adapter.py`) may.
 - **Pure Python.** No second implementation language and no compiled core.
 - **No LLM calls** in the crawl/discover/classify/extract path. Classification is
   rule-based so runs are deterministic and cost nothing.

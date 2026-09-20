@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -191,7 +192,7 @@ def test_a_caller_supplied_driver_is_never_started_or_closed(tmp_path):
 def test_an_owned_driver_is_started_and_closed(tmp_path, monkeypatch):
     made = []
 
-    def fake_create(backend, *, headless):
+    def fake_create(backend, *, headless, platform_detection):
         made.append((backend, headless))
         driver = FakeSiteDriver(small_site())
         made.append(driver)
@@ -205,15 +206,31 @@ def test_an_owned_driver_is_started_and_closed(tmp_path, monkeypatch):
 
 def test_an_owned_driver_is_closed_even_when_the_run_fails(tmp_path, monkeypatch):
     driver = FakeSiteDriver(small_site(), interrupt_on="https://e.com/")
-    monkeypatch.setattr("healix.sdk.create_driver", lambda backend, *, headless: driver)
+    monkeypatch.setattr("healix.sdk.create_driver", lambda backend, **_: driver)
     with pytest.raises(Interrupt):
         Crawler(config(tmp_path)).discover()
     assert driver.closed == 1
 
 
-def test_the_selenium_backend_reports_that_it_is_not_available_yet(tmp_path):
-    with pytest.raises(BackendUnavailableError, match="not implemented"):
+def test_the_selenium_backend_says_how_to_install_it_when_it_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "healix.driver.selenium_adapter", None)  # import fails
+    with pytest.raises(BackendUnavailableError, match=r"healix\[selenium\]"):
         Crawler(config(tmp_path, backend="selenium")).discover()
+
+
+def test_the_run_config_decides_whether_platform_adapters_run(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_create(backend, *, headless, platform_detection):
+        seen.append(platform_detection)
+        return FakeSiteDriver(small_site())
+
+    monkeypatch.setattr("healix.sdk.create_driver", fake_create)
+    Crawler(config(tmp_path)).discover()
+    off = config(tmp_path)
+    off["crawl"]["extraction"].update(platform_detection="off", output_path=str(tmp_path / "off"))
+    Crawler(off).discover()
+    assert seen == ["auto", "off"]
 
 
 def test_an_invalid_webhook_url_fails_at_construction(tmp_path):

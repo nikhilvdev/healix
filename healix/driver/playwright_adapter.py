@@ -6,6 +6,7 @@ This is one of the only modules allowed to import ``playwright``.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
@@ -13,12 +14,15 @@ from playwright.sync_api import Frame as PlaywrightFrame
 from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 
 from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Target
-from healix.driver.frames import COLLECT_ALL_JS, DESCRIBE_ONE_JS, collect_elements, walk_frames
+from healix.driver.frames import build_collect_js, build_describe_js, collect_elements, walk_frames
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
 from healix.log import get_logger
+from healix.platform_adapters import ADAPTERS, PlatformAdapter
 
 logger = get_logger(__name__)
+
+_NAVIGATION_ATTEMPTS = 3
 
 
 class PlaywrightDriverAdapter(Driver):
@@ -27,6 +31,9 @@ class PlaywrightDriverAdapter(Driver):
     Pass an existing ``page`` to embed in a caller-managed session (the caller
     keeps ownership and ``close()`` is a no-op), or omit it and the adapter
     launches and owns its own browser on ``start()`` / context-manager entry.
+
+    ``platform_adapters`` are the optional platform hooks (``healix.platform_adapters``); the
+    default is all of them, ``()`` turns them off.
     """
 
     def __init__(
@@ -36,7 +43,11 @@ class PlaywrightDriverAdapter(Driver):
         browser: str = "chromium",
         headless: bool = True,
         settle_timeout_ms: int = 3000,
+        platform_adapters: Sequence[PlatformAdapter] | None = None,
     ) -> None:
+        adapters = ADAPTERS if platform_adapters is None else tuple(platform_adapters)
+        self._collect_js = build_collect_js(adapters)
+        self._describe_js = build_describe_js(adapters)
         self._page = page
         self._settle_timeout_ms = settle_timeout_ms
         self._browser_name = browser
@@ -80,15 +91,31 @@ class PlaywrightDriverAdapter(Driver):
         return self.page.url
 
     def navigate(self, url: str) -> None:
-        self.page.goto(url, wait_until="load")
+        for attempt in range(_NAVIGATION_ATTEMPTS):
+            try:
+                self.page.goto(url, wait_until="load")
+                break
+            except PlaywrightError as exc:
+                # Right after a failed load, the browser can still be committing that load's error
+                # page and interrupt the next navigation. That is not this page failing, so try
+                # again; a page that really fails raises its own error, which is not retried.
+                if "interrupted by another navigation" not in str(exc) or (
+                    attempt == _NAVIGATION_ATTEMPTS - 1
+                ):
+                    raise
+                logger.debug("navigation was interrupted; retrying", url=url, attempt=attempt + 1)
+                self._wait_for_load(1000)
         self.settle()
+
+    def _wait_for_load(self, timeout_ms: int) -> None:
+        try:
+            self.page.wait_for_load_state("load", timeout=timeout_ms)
+        except PlaywrightError:
+            logger.debug("page did not finish loading")
 
     def settle(self) -> None:
         # A navigation in flight must finish before the page can be read.
-        try:
-            self.page.wait_for_load_state("load", timeout=max(self._settle_timeout_ms, 1000))
-        except PlaywrightError:
-            logger.debug("page did not finish loading while settling")
+        self._wait_for_load(max(self._settle_timeout_ms, 1000))
         # Client-rendered pages keep fetching after `load`; give them a bounded chance to go
         # idle. Busy pages (polling, websockets) never do, so a timeout here is expected.
         # (Playwright treats timeout=0 as "wait forever", so 0 here means "don't wait".)
@@ -111,7 +138,7 @@ class PlaywrightDriverAdapter(Driver):
         frames = self.get_frames()
         if not iframe_traversal:
             frames = frames[:1]  # the main frame is always first
-        return collect_elements(frames, lambda frame: frame.handle.evaluate(COLLECT_ALL_JS))
+        return collect_elements(frames, lambda frame: frame.handle.evaluate(self._collect_js))
 
     def find(self, fingerprint: Fingerprint) -> Element:
         frames = self._search_frames(fingerprint)
@@ -133,7 +160,9 @@ class PlaywrightDriverAdapter(Driver):
         for frame in frames:
             locator = self._resolve(spec, frame.handle, fingerprint)
             if locator is not None:
-                return Element.from_dict(locator.evaluate(DESCRIBE_ONE_JS), iframe_path=frame.path)
+                return Element.from_dict(
+                    locator.evaluate(self._describe_js), iframe_path=frame.path
+                )
         return None
 
     def click(self, target: Target) -> None:

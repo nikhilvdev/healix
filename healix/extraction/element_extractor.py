@@ -56,6 +56,7 @@ from healix.fs import write_json_atomic
 from healix.healing.baseline import KEEP, MODES, record_page
 from healix.healing.store import FingerprintStore
 from healix.log import get_logger
+from healix.platform_adapters import detected_platform
 from healix.timeutil import iso_utc, utc_now
 
 logger = get_logger(__name__)
@@ -74,9 +75,10 @@ class ExtractionConfig:
     """The ``crawl.extraction`` block of the run config.
 
     ``sequence`` and ``output_format`` have a single supported value each today;
-    they exist so the run config is accepted as documented. ``platform_detection``
-    is accepted and validated, but acts only once the platform adapters land
-    — until then ``platform_detected`` stays ``null``.
+    they exist so the run config is accepted as documented. ``platform_detection`` is ``"auto"``
+    (the platform adapters may add a ``platform_signal`` to elements, and the manifest records
+    which platform was seen) or ``"off"`` (no platform signals; ``platform_detected`` stays
+    ``null``). The generic pipeline runs either way.
     """
 
     sequence: str = "one_by_one"
@@ -283,6 +285,9 @@ class ElementExtractor:
         self.driver.navigate(page.url)
         final_url = self.driver.current_url
         elements = self.driver.get_elements(iframe_traversal=self.config.iframe_traversal)
+        if self.config.platform_detection == "off":
+            for element in elements:
+                element.platform_signal = None  # whatever the driver was set up to add
         return elements, final_url
 
     def _fail(self, manifest: Manifest, page: ManifestPage, exc: Exception) -> None:
@@ -313,6 +318,8 @@ class ElementExtractor:
 
         previous_type = page.page_type
         page_type = self._classify(elements, final_url, page)
+        if manifest.platform_detected is None:
+            manifest.platform_detected = detected_platform(elements)
         document = build_page_document(
             run_id=manifest.run_id,
             url=page.url,

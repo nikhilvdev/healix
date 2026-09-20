@@ -1,23 +1,8 @@
-"""Classification of realistic pages rendered by real Chromium."""
+"""Classification of realistic pages rendered in a real browser."""
 
 import pytest
 
-pytest.importorskip("playwright")
-
-from healix.classification import classify_page  # noqa: E402
-from healix.driver.playwright_adapter import PlaywrightDriverAdapter  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def driver():
-    adapter = PlaywrightDriverAdapter()
-    try:
-        adapter.start()
-    except Exception as exc:
-        pytest.skip(f"cannot launch Chromium: {exc}")
-    yield adapter
-    adapter.close()
-
+from healix.classification import classify_page
 
 # (page, expected type). Most pages sit at neutral URLs so the *element* signals carry the
 # decision; the OAuth and detail pages need their URL, which is part of what they test.

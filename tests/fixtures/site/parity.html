@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<body>
+  <h1>Parity</h1>
+  <div id="d1"><p id="p1">Hello</p></div>
+  <div id="d2">Hello   <b id="bold">x</b></div>
+  <button id="b1">Save <span id="s1">now</span></button>
+  <input id="ib" type="button" value="Press">
+  <input id="it" type="text" value="Press">
+  <textarea id="ta">Press</textarea>
+  <a id="nx1">Next page</a>
+  <a id="nx2">Next page</a>
+  <div id="odd" data-x="a b" data-testid='q"uote'>odd attribute values</div>
+  <ul><li>one</li><li>two</li><li id="three">three</li></ul>
+  <my-el id="custom"><span id="slotted">slotted</span></my-el>
+  <span id="dup">1</span>
+  <span id="dup">2</span>
+  <div id="host1"></div>
+  <div id="host2"></div>
+  <div id="closed"></div>
+  <script>
+    document.getElementById('host1').attachShadow({mode: 'open'}).innerHTML =
+      '<section class="s"><button id="sb">Shadow</button></section><span id="dup">3</span>';
+    const outer = document.getElementById('host2').attachShadow({mode: 'open'});
+    outer.innerHTML = '<div id="inner-host"></div>';
+    outer.getElementById('inner-host').attachShadow({mode: 'open'}).innerHTML =
+      '<input id="deep" name="deep"><a>Deep link</a>';
+    document.getElementById('closed').attachShadow({mode: 'closed'}).innerHTML =
+      '<button id="hidden-btn">Closed</button>';
+  </script>
+</body>
+</html>

@@ -1,23 +1,14 @@
-"""Integration tests against a real Chromium and the local fixture site."""
+"""The ``Driver`` contract, checked against every backend and a real browser.
+
+Each test runs once per backend (Playwright and Selenium) against the same local fixture site, so
+"the same pipeline runs unmodified on either backend" is something these tests can fail.
+"""
 
 import pytest
 
-pytest.importorskip("playwright")
-
-from healix.driver.base import ElementNotFoundError  # noqa: E402
-from healix.driver.playwright_adapter import PlaywrightDriverAdapter  # noqa: E402
-from healix.healing.fingerprint import Fingerprint  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def driver():
-    adapter = PlaywrightDriverAdapter()
-    try:
-        adapter.start()
-    except Exception as exc:  # browser binaries not installed
-        pytest.skip(f"cannot launch Chromium: {exc}")
-    yield adapter
-    adapter.close()
+from healix.driver.base import ElementNotFoundError
+from healix.healing.fingerprint import Fingerprint, LocatorSpec
+from tests.driver.backends import evaluate
 
 
 @pytest.fixture
@@ -101,31 +92,30 @@ def test_open_shadow_roots_are_pierced_recursively(page):
 
 
 def test_every_extracted_css_selector_resolves_to_its_own_element(page):
-    for frame in page.get_frames():
-        if not frame.same_origin:
-            continue
-        for el in (e for e in page.get_elements() if e.iframe_path == frame.path):
-            assert frame.handle.locator(el.css_selector).count() == 1, el.css_selector
+    for el in page.get_elements():
+        fingerprint = Fingerprint.from_element(el, "u")
+        found = page.locate(LocatorSpec("css", "css", el.css_selector), fingerprint)
+        assert found is not None, el.css_selector
+        assert (found.iframe_path, found.css_selector) == (el.iframe_path, el.css_selector)
 
 
 def test_click_and_write_reach_iframe_and_shadow_elements(page):
     elements = page.get_elements()
     page.click(_by(elements, id="go"))
-    form_frame = next(f for f in page.get_frames() if f.path[-1] == "form_frame")
-    assert form_frame.handle.evaluate("window.__clicks") == ["go"]
+    form = ["main", "workspace_panel", "form_frame"]
+    assert evaluate(page, form, "window.__clicks") == ["go"]
 
     page.click(_by(elements, tag="button", css_selector="#lwc-host div > button"))
-    assert page.page.evaluate("window.__clicks") == ["shadow-btn"]
+    assert evaluate(page, ["main"], "window.__clicks") == ["shadow-btn"]
 
     page.write("a@b.co", _by(elements, id="email"))
-    assert form_frame.handle.evaluate("document.getElementById('email').value") == "a@b.co"
+    assert evaluate(page, form, "document.getElementById('email').value") == "a@b.co"
     page.write("deep text", _by(elements, id="deep-1"))
-    assert (
-        page.page.evaluate(
-            "document.getElementById('lwc-host').shadowRoot.getElementById('inner-host').shadowRoot.getElementById('deep-1').value"
-        )
-        == "deep text"
+    deep = (
+        "document.getElementById('lwc-host').shadowRoot.getElementById('inner-host')"
+        ".shadowRoot.getElementById('deep-1').value"
     )
+    assert evaluate(page, ["main"], deep) == "deep text"
 
 
 def _fingerprint(**overrides):
