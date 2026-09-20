@@ -417,3 +417,32 @@ def test_a_login_page_that_is_itself_untrusted_is_refused_outright():
     handler, _ = make(driver)
     assert enter(handler, driver).reason == SELECTOR_NOT_FOUND
     assert driver.writes == []
+
+
+# --- credentials per role -------------------------------------------------------------------- #
+
+
+def test_a_roles_credentials_are_read_from_variables_named_after_it():
+    env = {
+        "WEBLIB_LOGIN_USERNAME": "plain-user",
+        "WEBLIB_LOGIN_PASSWORD": "plain-pass",
+        "WEBLIB_LOGIN_USERNAME_ADMIN": "admin-user",
+        "WEBLIB_LOGIN_PASSWORD_ADMIN": "admin-pass",
+    }
+    assert Credentials.from_env(env) == Credentials("plain-user", "plain-pass")
+    assert Credentials.from_env(env, role="admin") == Credentials("admin-user", "admin-pass")
+    assert Credentials.from_env(env, role="standard") is None
+
+
+def test_a_role_needs_both_of_its_variables_and_never_falls_back_to_the_plain_ones():
+    env = {
+        "WEBLIB_LOGIN_USERNAME": "u",
+        "WEBLIB_LOGIN_PASSWORD": "p",
+        "WEBLIB_LOGIN_USERNAME_A": "x",
+    }
+    assert Credentials.from_env(env, role="a") is None
+
+
+def test_the_anonymous_role_has_no_credentials_even_if_the_variables_exist():
+    env = {"WEBLIB_LOGIN_USERNAME_ANONYMOUS": "u", "WEBLIB_LOGIN_PASSWORD_ANONYMOUS": "p"}
+    assert Credentials.from_env(env, role="anonymous") is None

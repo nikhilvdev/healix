@@ -8,6 +8,10 @@
     healix doctor   [--launch]
     healix flush-events --outbox events.db --webhook-url URL
 
+A run config with ``roles`` is crawled once per role (each with its own credentials) and the roles
+are compared; ``--role`` limits ``crawl`` to some of them, or says which credentials ``extract``
+uses.
+
 ``crawl`` runs discovery then extraction (or discovery only with ``--discover-only``);
 ``extract`` (re)runs extraction over an existing manifest; ``generate`` writes a self-healing
 Playwright or Selenium script from the extracted pages; ``doctor`` checks that this machine can run
@@ -40,7 +44,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from healix import __version__
-from healix.auth import PASSWORD_ENV, USERNAME_ENV
+from healix.auth import PASSWORD_ENV, USERNAME_ENV, credential_env_names
 from healix.config import ConfigError, RunConfig
 from healix.doctor import format_report, run_doctor
 from healix.driver.factory import BackendUnavailableError
@@ -48,7 +52,7 @@ from healix.events import DurableWebhookSender, Outbox, OutboxError
 from healix.events.outbox import DEAD, PENDING
 from healix.generation import BACKENDS, STYLES, GenerationError, ScriptGenerator
 from healix.log import configure_logging
-from healix.sdk import WEBHOOK_SECRET_ENV, Crawler, Extractor, Run
+from healix.sdk import WEBHOOK_SECRET_ENV, Crawler, Extractor, MultiRoleRun, RoleCrawler, Run
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -105,12 +109,23 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument(
         "--discover-only", action="store_true", help="find pages but extract nothing"
     )
+    crawl.add_argument(
+        "--role",
+        action="append",
+        metavar="NAME",
+        help="with roles in the config, crawl only this role (repeat for several)",
+    )
     common(crawl)
 
     extract = sub.add_parser("extract", help="extract the pages of an existing manifest")
     extract.add_argument("--manifest", required=True, help="path to manifest.json")
     extract.add_argument(
         "--config", help="path to the run config JSON (default: output beside the manifest)"
+    )
+    extract.add_argument(
+        "--role",
+        metavar="NAME",
+        help="the user role whose credentials to log in with (default: the manifest's own)",
     )
     common(extract)
 
@@ -184,7 +199,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "flush-events":
         return _flush_events(args)
 
-    runner: Crawler | Extractor | None = None
+    runner: Crawler | RoleCrawler | Extractor | None = None
+    run: Run | MultiRoleRun
     try:
         if args.command == "crawl":
             config = RunConfig.load(args.config)
@@ -192,15 +208,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 config = replace(
                     config, extraction=replace(config.extraction, output_path=args.output)
                 )
-            runner = Crawler(
-                config,
-                run_id=args.run_id,
-                webhook_url=args.webhook_url,
-                webhook_outbox=args.webhook_outbox,
-                headless=not args.headed,
-                auto_login=not args.no_login,
-                fingerprint_store=args.fingerprint_db,
-            )
+            if config.roles:
+                runner = RoleCrawler(
+                    config,
+                    run_id=args.run_id,
+                    only=args.role,
+                    webhook_url=args.webhook_url,
+                    webhook_outbox=args.webhook_outbox,
+                    headless=not args.headed,
+                    auto_login=not args.no_login,
+                    fingerprint_store=args.fingerprint_db,
+                )
+            elif args.role:
+                raise ValueError("--role needs a run config with roles")
+            else:
+                runner = Crawler(
+                    config,
+                    run_id=args.run_id,
+                    webhook_url=args.webhook_url,
+                    webhook_outbox=args.webhook_outbox,
+                    headless=not args.headed,
+                    auto_login=not args.no_login,
+                    fingerprint_store=args.fingerprint_db,
+                )
             run = runner.discover() if args.discover_only else runner.discover_and_extract()
         else:
             config_arg = RunConfig.load(args.config, require_start=False) if args.config else None
@@ -211,6 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 headless=not args.headed,
                 auto_login=not args.no_login,
                 fingerprint_store=args.fingerprint_db,
+                role=args.role,
             )
             run = runner.extract(args.manifest)
     except KeyboardInterrupt:
@@ -288,6 +319,31 @@ def _generate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _report_roles(run: MultiRoleRun) -> None:
+    print(f"run {run.run_id}: {len(run.runs)} role(s)")
+    for role, result in run.runs.items():
+        print(
+            f"  {role}: {result.pages_extracted} of {result.pages_discovered} pages extracted "
+            f"(discovery {result.discovery_status})"
+        )
+        if result.blocked_on_auth:
+            names = " and ".join(credential_env_names(role))
+            print(f"    blocked on authentication: check {names}")
+        elif result.pages_failed:
+            print(
+                f"    {result.pages_failed} page(s) failed; re-run with --run-id {run.run_id} "
+                f"--role {role} to retry them"
+            )
+    if run.diff is not None:
+        diff = run.diff
+        print(
+            f"compared {', '.join(diff.roles)}: {len(diff.page_differences)} page difference(s), "
+            f"{len(diff.element_differences)} element difference(s)"
+        )
+        print(f"diff: {run.diff_path}")
+    print(f"output: {run.output_path}")
+
+
 def _outbox_note(path: str | None) -> None:
     """Say, on stderr, when a run left webhook events in its outbox."""
     if not path or not Path(path).exists():
@@ -360,9 +416,12 @@ def _flush_events(args: argparse.Namespace) -> int:
     return EXIT_PARTIAL if rejected else EXIT_OK
 
 
-def _report(run: Run, *, as_json: bool) -> None:
+def _report(run: Run | MultiRoleRun, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(run.summary()))
+        return
+    if isinstance(run, MultiRoleRun):
+        _report_roles(run)
         return
     print(
         f"run {run.run_id}: {run.pages_extracted} of {run.pages_discovered} pages extracted "

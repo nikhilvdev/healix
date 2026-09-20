@@ -3,7 +3,8 @@
 There is no login configuration step: when discovery or extraction lands on a page the
 classifier calls ``login``, ``LoginHandler.handle_page`` fills and submits it with the
 credentials from the environment (``WEBLIB_LOGIN_USERNAME`` / ``WEBLIB_LOGIN_PASSWORD``),
-then the crawl carries on. One credential per run.
+then the crawl carries on. One credential per crawl: a multi-role run (``healix.auth.roles``) is
+several crawls, each with a handler, credentials and browser of its own.
 
 What it handles
     * a username + password form (optionally in an iframe or shadow root);
@@ -45,6 +46,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from healix.auth.forms import LoginForm, detect_mfa, find_login_form, login_error_visible
+from healix.auth.roles import ANONYMOUS, credential_env_names
 from healix.classification import classify, is_oauth_url
 from healix.discovery.manifest import normalize_url
 from healix.driver.base import Driver, Element
@@ -84,10 +86,22 @@ class Credentials:
         return "Credentials(username='***', password='***')"
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> Credentials | None:
-        """Credentials from ``WEBLIB_LOGIN_USERNAME``/``WEBLIB_LOGIN_PASSWORD``, or ``None``."""
+    def from_env(
+        cls, environ: Mapping[str, str] | None = None, *, role: str | None = None
+    ) -> Credentials | None:
+        """Credentials from ``WEBLIB_LOGIN_USERNAME``/``WEBLIB_LOGIN_PASSWORD``, or ``None``.
+
+        With a ``role``, the variables carry its name in capitals (``WEBLIB_LOGIN_USERNAME_ADMIN``;
+        see ``healix.auth.roles``), so several credentials can sit side by side. The ``anonymous``
+        role has none, by definition.
+        """
+        if role == ANONYMOUS:
+            return None
         env = os.environ if environ is None else environ
-        username, password = env.get(USERNAME_ENV), env.get(PASSWORD_ENV)
+        user_var, password_var = (
+            (USERNAME_ENV, PASSWORD_ENV) if role is None else (credential_env_names(role))
+        )
+        username, password = env.get(user_var), env.get(password_var)
         if username and password:
             return cls(username, password)
         return None

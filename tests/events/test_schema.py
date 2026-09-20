@@ -46,12 +46,28 @@ VALID = {
         "reason": "mfa_required",
         "screenshot_ref": None,
     },
+    "roles_compared": {
+        "roles": ["admin", "standard"],
+        "diff_path": "output/roles-diff.json",
+        "differences": 4,
+    },
 }
 
 
-def test_the_six_documented_event_types():
+def test_the_seven_documented_event_types():
     assert set(EVENT_TYPES) == set(VALID) == set(EVENT_DATA_FIELDS)
-    assert len(EVENT_TYPES) == 6
+    assert len(EVENT_TYPES) == 7
+
+
+def test_the_role_is_in_the_envelope_only_when_there_is_one():
+    plain = make_event("run_complete", "r", VALID["run_complete"]).to_dict()
+    assert "role" not in plain and set(plain) == {"event", "run_id", "timestamp", "data"}
+    with_role = make_event("run_complete", "r", VALID["run_complete"], role="admin").to_dict()
+    assert with_role["role"] == "admin"
+    assert {k: v for k, v in with_role.items() if k != "role"} == {
+        **plain,
+        "timestamp": with_role["timestamp"],
+    }
 
 
 @pytest.mark.parametrize("event", EVENT_TYPES)

@@ -4,10 +4,23 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Two opt-in additions: click-through discovery, and durable webhook delivery. Without them, a run
-behaves exactly as before.
+Three opt-in additions: multi-role runs, click-through discovery, and durable webhook delivery.
+Without them, a run behaves exactly as before.
 
 ### Added
+- **Multi-role runs** (`"roles": ["admin", "standard"]` in the run config). The site is crawled once
+  per role, each with its own credentials (`WEBLIB_LOGIN_USERNAME_<ROLE>` /
+  `WEBLIB_LOGIN_PASSWORD_<ROLE>`, from the environment only; the config holds names, never secrets)
+  and in a fresh browser, so no role's session reaches another's. Each role gets its own manifest and
+  page files under `output/roles/<role>/`, and `output/roles-diff.json` says which pages and which
+  visible, actionable elements each role can reach. `anonymous` is a reserved role that never logs
+  in. New: `RoleCrawler` and `MultiRoleRun` (`Crawler` refuses a config with roles, so its return
+  type never changes), `Extractor(role=…)` (defaults to the manifest's own role), `healix crawl
+  --role NAME` and `healix extract --role NAME`, and `Credentials.from_env(role=…)`.
+- **`roles_compared` event** (`roles`, `diff_path`, `differences`), emitted once at the end of a
+  multi-role run. In a multi-role run every event also carries `"role"` in the envelope; a run without
+  roles has no such key, so its payloads are unchanged.
+- Manifests of a role carry `"role"`; it is left out of a manifest without one.
 - **Click-through discovery** (`crawl.discovery.click_discovery`, off by default). Clicks the buttons and
   script links that have no `<a href>` to find pages that only script can reach, such as
   single-page-app routes. It never submits a form and never clicks anything that looks like it deletes,
@@ -34,6 +47,10 @@ behaves exactly as before.
 - `healix.events`: `DurableWebhookSender`, `Outbox`, `OutboxError`, `open_sender`, `EventSender`.
 
 ### Notes
+- Multi-role fingerprints stay keyed by `(page_url, element_role)`: the first role to see an element
+  records it, and `fingerprint_mode="refresh"` is refused for a multi-role run so the last role cannot
+  overwrite the rest. Roles run one after another. A role is a set of credentials, not a permission
+  model: the diff reports what was reached, not what should have been.
 - Click-through discovery errs towards skipping, so it misses some real navigation, and it is slow: each click loads the page again. Keep the caps tight.
 - Durable delivery is at least once, not exactly once, and expects one sender per outbox file.
 - After a run, a note on stderr says how many events are still waiting in the outbox.

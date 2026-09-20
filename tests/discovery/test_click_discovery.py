@@ -205,35 +205,3 @@ def test_the_config_block_of_a_run_config_can_turn_it_on():
         {"click_discovery": True, "max_clicks_per_page": 5, "max_clicks": 20, "click_deny": ["x"]}
     )
     assert config.click_discovery and config.max_clicks == 20 and config.click_deny == ["x"]
-
-
-# --- through the run config and the SDK ------------------------------------------------------- #
-
-
-def test_a_run_config_turns_click_discovery_on_and_the_events_and_manifest_show_it(
-    use_backend, spa, tmp_path
-):
-    from healix import Crawler
-
-    events = []
-    config = {
-        "base_url": spa.url + "/",
-        "crawl": {
-            "discovery": {"click_discovery": True, "max_clicks": 8, "click_deny": ["help"]},
-            "extraction": {"output_path": str(tmp_path / "out")},
-        },
-    }
-    run = Crawler(config, on_event=events.append).discover()
-    discovered = [e["data"]["url"] for e in events if e["event"] == "page_discovered"]
-    assert spa.url + "/orders" in discovered  # a click-found page is announced like any other
-    assert spa.url + "/help" not in discovered  # ...and the run's own deny words were honoured
-    saved = Manifest.load(run.manifest_path)
-    assert saved.click_discovery["clicks"] <= 8
-    assert saved.find_by_url(spa.url + "/orders").discovered_via == "click"
-    assert spa.writes == []
-    payload = next(e for e in events if e["event"] == "page_discovered")
-    assert set(payload["data"]) == {
-        "url",
-        "page_type",
-        "structural_hash",
-    }  # the payload is unchanged

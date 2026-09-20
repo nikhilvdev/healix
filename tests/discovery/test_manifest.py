@@ -180,3 +180,14 @@ def test_extracted_constant_used_by_resume():
     p, _ = m.add_page("https://e.com/x", "h")
     p.status = EXTRACTED
     assert m.remaining_pages() == []
+
+
+def test_a_manifests_role_survives_saving_and_is_left_out_when_there_is_none(tmp_path):
+    from healix.discovery.manifest import Manifest
+
+    plain = Manifest("r")
+    assert "role" not in plain.to_dict()
+    named = Manifest("r", role="admin")
+    named.save(tmp_path / "m.json")
+    assert Manifest.load(tmp_path / "m.json").role == "admin"
+    assert Manifest.from_dict({"run_id": "old"}).role is None

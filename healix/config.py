@@ -10,7 +10,8 @@
         "discovery":  {"domain_scope": "same_domain", "max_pages": 50, ...},
         "extraction": {"output_path": "./output/", "iframe_traversal": true, ...}
       },
-      "backend": "playwright | selenium"
+      "backend": "playwright | selenium",
+      "roles": ["admin", "standard"]
     }
 
 * **guided** — ``start_url`` is given; the crawl starts there (and from ``base_url`` too,
@@ -18,6 +19,10 @@
 * **autonomous** — only ``base_url`` is given; the crawl discovers from scratch.
 
 ``mode`` may be omitted: it is guided if ``start_url`` is present, else autonomous.
+
+``roles`` is optional: a list of role *names* (never credentials). With it, the site is crawled once
+per role, each logged in with that role's own credentials from the environment, and the results are
+compared. See ``healix.auth.roles`` and ``healix.rolediff``.
 
 The config never carries secrets. Any key that looks like a credential is rejected with
 a pointer to ``.env`` — the file is meant to be committed to a repo.
@@ -33,13 +38,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from healix.auth.roles import RoleError, validate_roles
 from healix.discovery.crawler import DiscoveryConfig
 from healix.extraction import ExtractionConfig
 
 MODES = ("guided", "autonomous")
 BACKENDS = ("playwright", "selenium")
 
-_TOP_LEVEL_KEYS = frozenset({"mode", "base_url", "start_url", "crawl", "backend"})
+_TOP_LEVEL_KEYS = frozenset({"mode", "base_url", "start_url", "crawl", "backend", "roles"})
 _CRAWL_KEYS = frozenset({"discovery", "extraction"})
 _SECRET_KEY = re.compile(
     r"pass(word|wd)|secret|token|api[-_]?key|credential|username", re.IGNORECASE
@@ -94,6 +100,9 @@ class RunConfig:
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     extraction: ExtractionConfig = field(default_factory=ExtractionConfig)
     backend: str = "playwright"
+    # Names of the user roles to crawl as, each with its own credentials in the environment
+    # (``healix.auth.roles``). Empty: one run with the one credential.
+    roles: tuple[str, ...] = ()
 
     @property
     def start_urls(self) -> list[str]:
@@ -133,6 +142,11 @@ class RunConfig:
         if backend not in BACKENDS:
             raise ConfigError(f"backend must be one of {BACKENDS}, got {backend!r}")
 
+        try:
+            roles = validate_roles(raw["roles"]) if "roles" in raw else ()
+        except RoleError as exc:
+            raise ConfigError(f"roles: {exc}") from exc
+
         return cls(
             mode=mode,
             base_url=base_url,
@@ -140,6 +154,7 @@ class RunConfig:
             discovery=_block("crawl.discovery", crawl.get("discovery"), DiscoveryConfig),
             extraction=_block("crawl.extraction", crawl.get("extraction"), ExtractionConfig),
             backend=backend,
+            roles=roles,
         )
 
     @classmethod

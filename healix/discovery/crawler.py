@@ -186,8 +186,9 @@ class DiscoveryCrawler:
         run_id: str | None = None,
         *,
         manifest_path: str | os.PathLike[str] | None = None,
+        role: str | None = None,
     ) -> Manifest:
-        """Crawl from ``start_urls`` and return the manifest.
+        """Crawl from ``start_urls`` and return the manifest (marked with ``role``, if any).
 
         With ``manifest_path`` the manifest is also written there when discovery
         ends — including when it is interrupted (``discovery_status`` is then
@@ -198,7 +199,9 @@ class DiscoveryCrawler:
         config = self.config
         starts = [normalize_url(u) for u in start_urls]
         scope = Scope(config.domain_scope, starts)
-        manifest = Manifest(run_id=run_id or uuid.uuid4().hex[:12], start_urls=list(start_urls))
+        manifest = Manifest(
+            run_id=run_id or uuid.uuid4().hex[:12], start_urls=list(start_urls), role=role
+        )
         self._click_found = {}
         if config.click_discovery:
             self._clicks = {"clicks": 0, "pages_found": 0, "skipped_unsafe": 0, "blocked_writes": 0}

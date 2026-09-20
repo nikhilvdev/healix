@@ -67,3 +67,28 @@ def test_the_clock_is_injectable():
     payload = EventEmitter("r", clock=lambda: fixed).emit("run_complete", **COMPLETE)
     assert payload["timestamp"] == "2026-01-02T03:04:05.000Z"
     assert json.dumps(payload)  # JSON-serializable
+
+
+def test_an_emitter_for_a_role_stamps_every_event_with_it():
+    seen = []
+    emitter = EventEmitter("r", role="admin", on_event=seen.append)
+    emitter.emit(
+        "run_complete",
+        pages_discovered=1,
+        pages_extracted=1,
+        platform_detected=None,
+        manifest_path="m.json",
+    )
+    assert seen[0]["role"] == "admin"
+
+
+def test_an_emitter_without_a_role_emits_exactly_the_old_payload():
+    seen = []
+    EventEmitter("r", on_event=seen.append).emit(
+        "run_complete",
+        pages_discovered=1,
+        pages_extracted=1,
+        platform_detected=None,
+        manifest_path="m.json",
+    )
+    assert "role" not in seen[0]

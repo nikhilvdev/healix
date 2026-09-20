@@ -14,7 +14,15 @@ from healix.healing import (  # noqa: E402
     SQLiteFingerprintStore,
     UnsupportedRenderingError,
 )
-from healix.sdk import Crawler, Extractor, Run, RunConflictError  # noqa: E402
+from healix.sdk import (  # noqa: E402
+    Crawler,
+    Extractor,
+    MultiRoleRun,
+    RoleCrawler,
+    RoleCredentialsError,
+    Run,
+    RunConflictError,
+)
 
 __all__ = [
     "ConfigError",
@@ -27,6 +35,9 @@ __all__ = [
     "HealResult",
     "Healer",
     "HealingError",
+    "MultiRoleRun",
+    "RoleCrawler",
+    "RoleCredentialsError",
     "Run",
     "RunConfig",
     "RunConflictError",

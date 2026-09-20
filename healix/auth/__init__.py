@@ -18,8 +18,10 @@ from healix.auth.login_handler import (
     LoginResult,
     redact_url,
 )
+from healix.auth.roles import ANONYMOUS, RoleError, credential_env_names, validate_roles
 
 __all__ = [
+    "ANONYMOUS",
     "AUTHENTICATED",
     "AUTH_REJECTED",
     "BLOCKED",
@@ -35,5 +37,8 @@ __all__ = [
     "Credentials",
     "LoginHandler",
     "LoginResult",
+    "RoleError",
+    "credential_env_names",
     "redact_url",
+    "validate_roles",
 ]

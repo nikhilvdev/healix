@@ -206,6 +206,8 @@ class Manifest:
     platform_detected: str | None = None
     # A login page was reached but no credentials were set: pages behind it were not reachable.
     blocked_on_auth: bool = False
+    # The user role this manifest was crawled as (multi-role runs); left out of the JSON when unset.
+    role: str | None = None
     # What click-through discovery did (``clicks``, ``pages_found``, ``skipped_unsafe``,
     # ``blocked_writes``); ``None`` when it was not on, and then left out of the JSON.
     click_discovery: dict[str, int] | None = None
@@ -314,6 +316,7 @@ class Manifest:
             "pages_extracted": self.pages_extracted,
             "platform_detected": self.platform_detected,
             "blocked_on_auth": self.blocked_on_auth,
+            **({"role": self.role} if self.role else {}),
             **({"click_discovery": self.click_discovery} if self.click_discovery else {}),
             "pages": [p.to_dict() for p in self.pages],
         }
@@ -326,6 +329,7 @@ class Manifest:
             discovery_status=raw.get("discovery_status", COMPLETE),
             platform_detected=raw.get("platform_detected"),
             blocked_on_auth=bool(raw.get("blocked_on_auth", False)),
+            role=raw.get("role") or None,
             click_discovery=raw.get("click_discovery") or None,
             pages=[ManifestPage.from_dict(p) for p in raw.get("pages") or []],
         )

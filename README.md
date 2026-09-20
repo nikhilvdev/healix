@@ -325,7 +325,8 @@ One JSON file describes a crawl. It is safe to commit: it never holds secrets.
       "platform_detection": "auto"
     }
   },
-  "backend": "playwright | selenium"
+  "backend": "playwright | selenium",
+  "roles": ["admin", "standard"]
 }
 ```
 
@@ -335,6 +336,7 @@ One JSON file describes a crawl. It is safe to commit: it never holds secrets.
 | `base_url`, `start_url` | Absolute http(s) URLs. Guided mode needs `start_url`; autonomous needs `base_url` |
 | `crawl.discovery` | See [Discovery config](#config) |
 | `crawl.extraction` | See [Extraction config](#config-1) |
+| `roles` | Optional list of user role **names** (never credentials): crawl once per role and compare. See [Multi-role runs](#multi-role-runs) |
 | `backend` | `playwright` (default) or `selenium`. Everything else in the config means the same on both. A backend whose library is not installed raises `BackendUnavailableError` saying which extra to install |
 
 Everything is optional except the start point. Unknown keys are errors, not silently ignored, so a
@@ -354,7 +356,8 @@ from healix import Crawler, Extractor
 | | |
 |---|---|
 | `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
-| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `RoleCrawler(config, *, run_id=None, only=None, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | For a config with `roles`: `.discover()` / `.discover_and_extract()` crawl once per role and return a `MultiRoleRun` (`.runs`, `.diff`, `.diff_path`) — see [Multi-role runs](#multi-role-runs). `Crawler` refuses such a config |
+| `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, webhook_outbox=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep", role=None)` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably. `role` picks whose credentials to use; it defaults to the manifest's own |
 | `ScriptGenerator(source, *, base_dir=None, fingerprint_db=None, record_fingerprints=True, max_elements_per_page=200, on_event=None, webhook_url=None, ...)` | `.to_playwright(style="pom")` / `.to_selenium(style="pom")` / `.generate(backend, style)` build a script and return a `GeneratedScript` — see [Script generation](#script-generation) |
 | `Healer(store=None, *, driver=None, threshold=0.5, ambiguity_margin=0.05, run_id=None, on_event=None, webhook_url=None, ...)` | Records fingerprints and finds elements again after the page changes — see [Self-healing](#self-healing) |
 
@@ -390,10 +393,10 @@ to resume it, or choose another output path.
 ## CLI
 
 ```bash
-healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only]
+healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover-only] [--role NAME]...
                [--webhook-url URL [--webhook-outbox PATH]] [--headed] [--no-login]
                [--fingerprint-db PATH] [--json] [--log-level LEVEL]
-healix extract --manifest output/manifest.json [--config run_config.json]
+healix extract --manifest output/manifest.json [--config run_config.json] [--role NAME]
                [--webhook-url URL [--webhook-outbox PATH]] [--headed] [--no-login]
                [--fingerprint-db PATH] [--json] [--log-level LEVEL]
 healix generate --input output/manifest.json [--backend playwright|selenium]
@@ -410,6 +413,8 @@ healix --version          # also: python -m healix
   the way to retry failed pages. Output goes beside the manifest unless `--config` says otherwise.
 - `--webhook-url` posts every event to that URL; see [Webhooks](#webhooks). The CLI goes through
   the SDK, so the events are exactly what `on_event` receives.
+- `--role NAME` (on `crawl`, repeatable) runs only those roles of a [multi-role run](#multi-role-runs);
+  on `extract` it says which role's credentials to log in with, and defaults to the manifest's own.
 - `--webhook-outbox PATH` makes webhook delivery durable and needs `--webhook-url`;
   `flush-events` sends what a run left in it. Both are described under [Durable delivery](#durable-delivery).
 - `--json` prints the run summary as one JSON line on stdout instead of the human text. Logs go to
@@ -472,6 +477,12 @@ so the contract can't drift.
 | `script_generated` | `backend`, `style`, `file_path`, `element_count` |
 | `run_complete` | `pages_discovered`, `pages_extracted`, `platform_detected`, `manifest_path` |
 | `login_failed` | `url`, `reason`, `screenshot_ref` |
+| `roles_compared` | `roles`, `diff_path`, `differences` |
+
+In a [multi-role run](#multi-role-runs) every event also carries `"role"` in the envelope, next to
+`event` and `run_id`, saying which role it happened under. A run without roles has no such key, so
+its payloads are exactly what they always were. `roles_compared` is emitted once, after the last
+role, and its `differences` is the number of page and element differences in `roles-diff.json`.
 
 `page_type` in `page_discovered` is provisional (classified during discovery); in `page_extracted`
 it is final. A `login_failed` `reason` is one of `mfa_required`, `timeout`, `selector_not_found`,
@@ -554,7 +565,8 @@ healix crawl --config run_config.json --webhook-url https://hooks.example.com/he
 ## Authentication
 
 Login is not a configuration step. When discovery or extraction lands on a page the classifier
-calls `login`, Healix fills it in and carries on — one credential per run.
+calls `login`, Healix fills it in and carries on — one credential per crawl. To crawl as several
+users and compare what each can reach, see [Multi-role runs](#multi-role-runs).
 
 **Credentials** come from the environment, never from the run config:
 
@@ -593,7 +605,7 @@ The failure modes are fixed, and none of them can hang or loop:
 - **Every login has a deadline** (30 seconds) and a step limit; a form that goes nowhere is
   `timeout`.
 - CAPTCHAs, passkeys/WebAuthn, and hardware keys are not supported; they end as `timeout` or
-  `auth_rejected`. Multiple roles are out of scope for now.
+  `auth_rejected`.
 
 | `login_failed` reason | When |
 |---|---|
@@ -637,6 +649,115 @@ The credentials are never logged, never put in an event, and never written to di
 `login_failed` events drop their query string. A test crawls with a distinctive password and checks
 that neither it nor the username appears in any log record, event, summary, manifest, or output
 file.
+
+## Multi-role runs
+
+A site shows different things to different people. List **role names** in the run config, give each
+its own credentials in the environment, and Healix crawls the site once as each role and tells you
+what differs:
+
+```json
+{ "base_url": "https://app.example.com", "roles": ["admin", "standard", "anonymous"] }
+```
+
+```bash
+# .env  (git-ignored). Each role's variables carry its name in capitals.
+WEBLIB_LOGIN_USERNAME_ADMIN=admin@example.com
+WEBLIB_LOGIN_PASSWORD_ADMIN=...
+WEBLIB_LOGIN_USERNAME_STANDARD=sam@example.com
+WEBLIB_LOGIN_PASSWORD_STANDARD=...
+# "anonymous" is reserved: it never logs in, and needs nothing.
+```
+
+```bash
+healix crawl --config run_config.json
+```
+
+```text
+run 3f9a1c2b7d10: 3 role(s)
+  admin: 14 of 14 pages extracted (discovery complete)
+  standard: 9 of 9 pages extracted (discovery complete)
+  anonymous: 2 of 2 pages extracted (discovery complete)
+compared admin, standard, anonymous: 12 page difference(s), 7 element difference(s)
+diff: output/roles-diff.json
+output: output/
+```
+
+- **Names, not secrets.** `roles` holds names only, so the config stays safe to commit. A name is
+  lowercase letters, digits, `-` and `_` (starting with a letter, up to 32 characters), because it
+  becomes a folder and part of an environment variable. `read-only` uses `WEBLIB_LOGIN_USERNAME_READ_ONLY`.
+  Two names that would share a variable (`a-b` and `a_b`) are refused. In the SDK, pass
+  `credentials={"admin": Credentials(...)}` to `RoleCrawler` instead.
+- **A missing credential stops the run before any browser starts,** naming the variables to set.
+- **One fresh browser per role.** A role's login, cookies and storage are gone before the next role
+  starts, so no role can see through another's session. Roles run one after another, in the order
+  listed. (A `driver=` you supply is refused for this reason.)
+- **One folder per role.** Each role gets its own manifest and page files, and nothing else changes
+  about them:
+
+  ```text
+  output/
+    roles/
+      admin/      manifest.json  pages/…  screenshots/…
+      standard/   manifest.json  pages/…
+      anonymous/  manifest.json  pages/…
+    roles-diff.json
+  ```
+
+  Every role's manifest carries `"role"`, and all share one `run_id`. Generate a script for one role
+  from its own manifest: `healix generate --input output/roles/admin/manifest.json`.
+- **The `anonymous` role** is how to see what a visitor who is not signed in can reach. It never
+  logs in, so pages behind a login simply are not reached, and it never needs credentials.
+- **Resume and retry.** Re-run with the same `--run-id` to resume every role where it stopped
+  (finished roles log nobody in). `--role standard` runs just that role, and the diff still covers
+  every role that has a result on disk. A role that cannot log in is reported (`login_failed`, exit
+  `4`) and does not stop the others. `healix extract --manifest output/roles/admin/manifest.json`
+  finishes one role and logs in as it, because the manifest knows its role.
+
+### The diff
+
+`roles-diff.json` compares every role that has a result:
+
+```json
+{
+  "roles": ["admin", "standard"],
+  "summary": { "pages_reached": {"admin": 14, "standard": 9}, "pages_in_all_roles": 9,
+               "page_differences": 5, "element_differences": 3,
+               "only": {"admin": {"pages": 5, "elements": 3}, "standard": {"pages": 0, "elements": 0}} },
+  "page_differences":    [ {"url": "https://app.example.com/admin", "roles": ["admin"], "missing": ["standard"]} ],
+  "element_differences": [ {"url": "https://app.example.com/reports", "element": "button:export-csv",
+                            "roles": ["admin"], "missing": ["standard"]} ]
+}
+```
+
+- **Pages.** A role reached a URL if its manifest has it (as an entry or as a variant of one) and it
+  did not fail to load. `page_differences` lists every URL not reached by all roles.
+- **Elements.** On each page that two or more roles extracted to files of their own, an element is
+  compared by its *element role* (`button:export-csv`, the name a [fingerprint](#self-healing) is
+  stored under), and only **visible, actionable** elements count: a button, link or field a person
+  could use, not markup. So a control that is in the page but hidden from one role is a difference,
+  and a paragraph is not. An element with no stable name compares as its kind alone (`button`),
+  which is coarse.
+- **The event.** A `roles_compared` event (`roles`, `diff_path`, `differences`) is emitted once, last.
+  Every other event of a multi-role run carries `"role"`. See [Events](#events).
+- The diff holds URLs and element names taken from the output files, so treat it as sensitive in the
+  same way.
+
+### What roles do and do not do
+
+- **Fingerprints are not per role.** They stay keyed by `(page_url, element_role)`. An element two
+  roles both see is recorded once, by the first role that reaches it, and one only the administrator
+  sees is recorded by the administrator. `fingerprint_mode="refresh"` is refused for a multi-role
+  run, since whichever role ran last would overwrite the rest. A generated script heals against that
+  shared baseline, so an element that differs between roles is healed against whichever role saw it
+  first.
+- **Extraction stays sequential**, including across roles, so a run takes as long as its roles added
+  together.
+- **A role is a set of credentials, not a permission model.** Healix reports what each identity could
+  reach and see. It does not know what it *should* be able to, so a difference is a fact to review,
+  not a finding.
+- **One credential per role.** A user with several credentials, or several sessions, is several roles.
+  MFA still aborts the login, per role, as it does for a single run.
 
 ## Self-healing
 
@@ -1402,6 +1523,9 @@ These are fixed unless explicitly reopened:
   wrong. That is why heals are confidence-gated and audited — read the [regression
   flags](#the-healing-history) — and why a heavy refactor heals only just above the threshold.
 - **Classification is heuristic** — see [Accuracy and limits](#accuracy-and-limits).
+- **Multi-role runs** compare what each role can reach and see; they do not know what a role should
+  be allowed to, run roles one after another, and share one fingerprint baseline across roles — see
+  [Multi-role runs](#multi-role-runs).
 - **Login covers the common shapes only** — see [What it will not do](#what-it-will-not-do). A
   login that lives in a pop-up window or a cross-origin iframe is not handled. Login detection
   relies on the classifier, so a login page it does not recognise is treated as an ordinary page.

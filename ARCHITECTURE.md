@@ -70,7 +70,7 @@ one is a new decision, not a refactor.
 | Fingerprints | SQLite by default, PostgreSQL optional; keyed by `(page_url, element_role)`; heal history kept. | `healing/store.py` |
 | Sequential | Extraction is one page at a time so fingerprint writes stay ordered. | `extraction/` |
 | One schema | SDK `on_event` and CLI `--webhook-url` emit identical payloads. | `events/` |
-| One credential | A single credential per run; multi-role crawling is out of scope. | `auth/` |
+| One credential per crawl | A crawl has one credential. Several roles are several crawls, each with its own credential and a fresh browser, run one after another. | `auth/roles.py`, `sdk.py` |
 
 ## 3. The big picture
 
@@ -168,7 +168,8 @@ rest by tests of the behaviour they describe and by review:
 | Path | Responsibility |
 |---|---|
 | `healix/__init__.py` | Public exports (`Crawler`, `Extractor`, `Healer`, `ScriptGenerator`, errors), `__version__`. |
-| `sdk.py` | `Crawler`, `Extractor`, `Run`: wire config, browser, login, events, fingerprint store around the pipeline. |
+| `sdk.py` | `Crawler`, `RoleCrawler`, `Extractor`, `Run`, `MultiRoleRun`: wire config, browser, login, events, fingerprint store around the pipeline. |
+| `rolediff.py` | `build_role_diff`, `RoleDiff`: what each user role reached, page by page and element by element. |
 | `healer.py` | `Healer`: public entry to self-healing (learn, resolve, click, write, history, report). |
 | `cli.py`, `__main__.py` | `healix crawl / extract / generate / doctor`; exit codes; `.env` loading. |
 | `doctor.py` | Environment checks for `healix doctor`. |
@@ -189,6 +190,7 @@ rest by tests of the behaviour they describe and by review:
 | `extraction/element_extractor.py` | `ElementExtractor`, `ExtractionConfig`; writes page JSON; records fingerprints. |
 | `auth/forms.py` | Pure detection of login forms, MFA and error banners. |
 | `auth/login_handler.py` | `LoginHandler`, `Credentials`: fill, submit, SSO, re-login. |
+| `auth/roles.py` | User role names, their environment variables (`WEBLIB_LOGIN_USERNAME_<ROLE>`), the reserved `anonymous`. |
 | `healing/fingerprint.py` | `Fingerprint`, `LocatorSpec`, locator priority. |
 | `healing/roles.py` | Stable element role names (`textbox:username`). |
 | `healing/scorer.py` | Weighted similarity; `WEIGHTS`, thresholds. |
@@ -569,6 +571,45 @@ stateDiagram-v2
 - Failure emits `login_failed` with `url`, a `reason`, and a `screenshot_ref` (a path relative to the
   output directory, or null).
 
+### User roles (`auth/roles.py`, `rolediff.py`, `sdk.RoleCrawler`)
+
+A **user role** names who is looking at the site; do not confuse it with an **element role**
+(`healing/roles.py`, `button:save`), which names an element. `"roles": ["admin", "standard"]` in the
+run config holds names only, so the config stays safe to commit; each role's credentials are in the
+environment under its name in capitals, and `anonymous` is reserved for "no login". Names are
+validated because a name becomes a folder and part of a variable name (lowercase, `-`, `_`, at most
+32 characters, no two sharing a variable).
+
+```mermaid
+flowchart TD
+    A["RoleCrawler.discover_and_extract"] --> B["check every role has credentials<br/>(fail before any browser starts)"]
+    B --> C["one shared run id<br/>(resume needs it; a stray existing run is a conflict)"]
+    C --> D["for each role, in order"]
+    D --> E["fresh driver, fresh session, own LoginHandler and credentials"]
+    E --> F["the ordinary crawl, into output/roles/&lt;role&gt;/<br/>events carry the role"]
+    F --> G["browser closed: nothing carries to the next role"]
+    G --> D
+    D -->|"all done"| H["build_role_diff over every role that has a manifest on disk"]
+    H --> I["roles-diff.json + a roles_compared event"]
+```
+
+- **Isolation is the browser.** Every role's session gets its own driver, closed before the next
+  role starts, so cookies and storage cannot cross. A caller-supplied driver is refused for this reason,
+  and Playwright's one-instance-per-thread limit is respected because roles never overlap.
+- **The fingerprint key does not include the user role.** It stays `(page_url, element_role)`. The
+  alternatives were a new key dimension, which needs a migration of both stores and a role argument
+  in every generated script for a rare case, or refusing to share a store; the first role to see an
+  element records it (`keep`), and `fingerprint_mode="refresh"` is refused for a multi-role run because
+  the last role would then overwrite the rest.
+- **The diff is over visible, actionable elements** named by element role, and over URLs reached
+  (entries and variants, not failures). Elements are compared only where both roles extracted the URL to
+  a file of their own. It reports facts and does not know what a role should see.
+- **Events** gain an optional `role` in the envelope (absent for a run without roles), and a
+  `roles_compared` event closes a run. A role that cannot log in fails on its own (`login_failed`,
+  `blocked_on_auth`) and the other roles still run.
+- **`Crawler` refuses a config with roles** rather than return a different type of result; the CLI
+  picks `RoleCrawler` for it. `Extractor(role=…)` (default: the manifest's own role) finishes one role.
+
 ## 13. Self-healing
 
 ### Recording
@@ -741,14 +782,16 @@ All three share one event schema and one code path.
 | Class | Purpose |
 |---|---|
 | `Crawler(config, *, run_id, on_event, webhook_url, webhook_outbox, driver, credentials, auto_login, fingerprint_store, …)` | `.discover()`, `.discover_and_extract()` → `Run` |
-| `Extractor(config=None, …)` | `.extract(manifest)` over an existing manifest, resumably |
+| `RoleCrawler(config, *, run_id, only, on_event, credentials, …)` | for a config with `roles`: the same two calls → `MultiRoleRun` (`runs`, `diff`, `diff_path`) |
+| `Extractor(config=None, …, role=None)` | `.extract(manifest)` over an existing manifest, resumably, as `role` (default: the manifest's own) |
 | `Healer(store, *, driver, backend, threshold, ambiguity_margin, on_event, …)` | record fingerprints; resolve / click / write with healing; history |
 | `ScriptGenerator(source, *, base_dir, fingerprint_db, …)` | `.to_playwright(style)`, `.to_selenium(style)`, `.generate(backend, style)` |
 | `Run` | `run_id`, `pages`, counts, `platform_detected`, `blocked_on_auth`, `manifest_path`, `summary()` |
+| `MultiRoleRun` | `runs` by role, `diff`, `diff_path`, `pages_failed`, `blocked_on_auth`, `summary()` |
 
-`Crawler` and `Extractor` share a private `_Runner` whose `_session` context manager builds a
-started driver (unless you pass one), an optional webhook sender, an optional fingerprint store, and
-an `EventEmitter`, and tears them down in the right order. A driver or store you pass in stays yours.
+`Crawler`, `RoleCrawler` and `Extractor` share a private `_Runner` whose `_session` context manager
+builds a started driver (unless you pass one), an optional webhook sender, an optional fingerprint
+store, and an `EventEmitter` (which stamps the role, if any), and tears them down in the right order. A driver or store you pass in stays yours.
 The SDK never calls `sys.exit` and does not read `.env` (the CLI does).
 
 Errors are ordinary exceptions:
@@ -793,8 +836,10 @@ the events an SDK run does. Logs go to stderr; program output to stdout.
 
 ### Events (`events/`)
 
-Envelope: `{"event", "run_id", "timestamp", "data"}`. `data` has exactly the fields for its type, no
-more, no fewer; `make_event` validates this and rejects unknown types and extra or missing keys.
+Envelope: `{"event", "run_id", "timestamp", "data"}`, plus `"role"` in a multi-role run and only
+there, so a run without roles emits exactly the payloads it always did. `data` has exactly the fields
+for its type, no more, no fewer; `make_event` validates this and rejects unknown types and extra or
+missing keys.
 
 | Event | Emitted by | `data` |
 |---|---|---|
@@ -804,6 +849,7 @@ more, no fewer; `make_event` validates this and rejects unknown types and extra 
 | `script_generated` | `ScriptGenerator`, once per script | `backend`, `style`, `file_path` (null if not written), `element_count` |
 | `run_complete` | `Crawler` / `Extractor`, last | `pages_discovered`, `pages_extracted`, `platform_detected`, `manifest_path` |
 | `login_failed` | `LoginHandler`, once per failed login | `url` (no query string), `reason`, `screenshot_ref` |
+| `roles_compared` | `RoleCrawler`, once, last | `roles`, `diff_path`, `differences` |
 
 `reason` is one of `mfa_required`, `timeout`, `selector_not_found`, `auth_rejected`.
 
@@ -871,6 +917,7 @@ is rejected with a pointer to `.env`.
 | Where | Name | Purpose |
 |---|---|---|
 | `.env` / environment | `WEBLIB_LOGIN_USERNAME`, `WEBLIB_LOGIN_PASSWORD` | the run's single credential |
+| | `WEBLIB_LOGIN_USERNAME_<ROLE>`, `WEBLIB_LOGIN_PASSWORD_<ROLE>` | one credential per user role of a multi-role run (`<ROLE>` is the role name in capitals) |
 | | `HEALIX_WEBHOOK_SECRET` | signs webhook bodies |
 | | `HEALIX_LOG_LEVEL` | stderr log level (default `WARN`) |
 | | `HEALIX_FINGERPRINT_DB` | read by *generated scripts* when the database is a URL |
@@ -892,6 +939,17 @@ output/                          (crawl.extraction.output_path)
     └── actions_playwright.py
 
 healix.db                         default SQLite fingerprint store (git-ignored)
+```
+
+A multi-role run has no top-level manifest. Each role has a folder of its own, laid out as above, and
+the comparison sits beside them:
+
+```
+output/
+├── roles/
+│   ├── admin/       manifest.json  pages/  screenshots/
+│   └── standard/    manifest.json  pages/
+└── roles-diff.json               what each role reached (see rolediff.py)
 ```
 
 A page document: `schema_version`, `run_id`, `url`, `final_url` (only if it redirected), `page_type`,
@@ -1037,7 +1095,9 @@ Documented rather than hidden; each is also in the README.
 - **Classification is heuristic.** `unknown` is an honest answer.
 - **Login covers common shapes only**: no CAPTCHA, passkeys, hardware keys, pop-up-window or
   cross-origin-iframe logins; MFA aborts.
-- **One credential per run.** No multi-role crawling or diffing.
+- **A role is a set of credentials, not a permission model.** Multi-role runs report what each
+  identity reached and saw, not what it should have. Roles run one after another, one credential each,
+  sharing one fingerprint baseline (`keep`); MFA still aborts a role's login.
 - **Webhook delivery is best-effort by default.** With an outbox it is durable, in order and at least
   once (never exactly once), with one sender per file.
 - **Generated scripts** need Healix at runtime, do not log in by themselves, and check presence not

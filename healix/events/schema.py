@@ -4,7 +4,9 @@ Every event has the same envelope::
 
     {"event": "...", "run_id": "...", "timestamp": "2026-09-19T12:30:45.123Z", "data": {...}}
 
-and a ``data`` shape fixed by the event type (``EVENT_DATA_FIELDS``). The SDK's
+and a ``data`` shape fixed by the event type (``EVENT_DATA_FIELDS``). In a multi-role run every
+event also carries ``"role"`` (the user role it happened under); it is left out of a run that has
+no roles, so a single-credential run's payloads are exactly what they always were. The SDK's
 ``on_event`` callback and the CLI's ``--webhook-url`` both emit exactly this
 payload. ``make_event`` validates it — required keys present, no unknown keys — so
 the contract can't drift silently. Adding an event type means adding it here *and*
@@ -25,6 +27,7 @@ ELEMENT_HEALED = "element_healed"
 SCRIPT_GENERATED = "script_generated"
 RUN_COMPLETE = "run_complete"
 LOGIN_FAILED = "login_failed"
+ROLES_COMPARED = "roles_compared"
 
 EVENT_TYPES = (
     PAGE_DISCOVERED,
@@ -33,6 +36,7 @@ EVENT_TYPES = (
     SCRIPT_GENERATED,
     RUN_COMPLETE,
     LOGIN_FAILED,
+    ROLES_COMPARED,
 )
 
 # The keys of ``data`` for each event type — exactly these, no more and no fewer.
@@ -50,6 +54,7 @@ EVENT_DATA_FIELDS: dict[str, tuple[str, ...]] = {
     SCRIPT_GENERATED: ("backend", "style", "file_path", "element_count"),
     RUN_COMPLETE: ("pages_discovered", "pages_extracted", "platform_detected", "manifest_path"),
     LOGIN_FAILED: ("url", "reason", "screenshot_ref"),
+    ROLES_COMPARED: ("roles", "diff_path", "differences"),
 }
 
 LOGIN_FAILURE_REASONS = ("mfa_required", "timeout", "selector_not_found", "auth_rejected")
@@ -65,6 +70,7 @@ class Event:
     run_id: str
     timestamp: str
     data: dict[str, Any]
+    role: str | None = None
 
     def __post_init__(self) -> None:
         if self.event not in EVENT_DATA_FIELDS:
@@ -85,12 +91,15 @@ class Event:
 
     def to_dict(self) -> dict[str, Any]:
         """The wire payload, identical for callbacks and webhooks."""
-        return {
+        payload: dict[str, Any] = {
             "event": self.event,
             "run_id": self.run_id,
             "timestamp": self.timestamp,
             "data": dict(self.data),
         }
+        if self.role:
+            payload["role"] = self.role
+        return payload
 
 
 def make_event(
@@ -99,6 +108,7 @@ def make_event(
     data: dict[str, Any],
     *,
     timestamp: datetime | None = None,
+    role: str | None = None,
 ) -> Event:
     """Build a validated ``Event`` stamped with ``timestamp`` (default: now, UTC)."""
-    return Event(event, run_id, iso_utc(timestamp or utc_now()), dict(data))
+    return Event(event, run_id, iso_utc(timestamp or utc_now()), dict(data), role)

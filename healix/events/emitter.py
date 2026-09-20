@@ -35,18 +35,22 @@ class EventEmitter:
         self,
         run_id: str,
         *,
+        role: str | None = None,
         on_event: EventCallback | None = None,
         sender: EventSender | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.run_id = run_id
+        self.role = role
         self.on_event = on_event
         self.sender = sender
         self.clock = clock
 
     def emit(self, event: str, **data: Any) -> dict[str, Any]:
         """Validate, then deliver. Returns the payload. Raises ``EventError`` on a bad event."""
-        payload = make_event(event, self.run_id, data, timestamp=self.clock()).to_dict()
+        payload = make_event(
+            event, self.run_id, data, timestamp=self.clock(), role=self.role
+        ).to_dict()
         if self.on_event is not None:
             try:
                 self.on_event(payload)

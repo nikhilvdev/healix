@@ -179,3 +179,31 @@ def test_a_bad_click_setting_is_a_config_error_not_a_crash():
         RunConfig.from_dict(
             {"base_url": "https://e.com/", "crawl": {"discovery": {"max_clicks": 0}}}
         )
+
+
+def test_roles_are_names_read_from_the_run_config():
+    config = RunConfig.from_dict({"base_url": "https://e.com/", "roles": ["admin", "anonymous"]})
+    assert config.roles == ("admin", "anonymous")
+    assert RunConfig.from_dict({"base_url": "https://e.com/"}).roles == ()
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [[], "admin", ["Admin"], ["a", "a"], ["a-b", "a_b"], ["../x"], [1], ["roles"]],
+)
+def test_bad_roles_are_a_config_error_that_names_the_key(roles):
+    with pytest.raises(ConfigError, match="roles"):
+        RunConfig.from_dict({"base_url": "https://e.com/", "roles": roles})
+
+
+def test_a_role_name_is_not_mistaken_for_a_secret():
+    """Names like "token-user" are fine as values: only credential-looking *keys* are rejected."""
+    config = RunConfig.from_dict({"base_url": "https://e.com/", "roles": ["token-user", "reader"]})
+    assert config.roles == ("token-user", "reader")
+
+
+def test_credentials_still_cannot_be_put_in_the_config_next_to_roles():
+    with pytest.raises(ConfigError, match="credential"):
+        RunConfig.from_dict(
+            {"base_url": "https://e.com/", "roles": ["admin"], "admin_password": "hunter2"}
+        )
