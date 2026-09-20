@@ -116,6 +116,8 @@ select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
 # The platform hooks are JavaScript inside Python strings, like the collector.
 "healix/platform_adapters/*.py" = ["E501"]
 "tests/platform_adapters/pages.py" = ["E501"]
+# The single-page test app is JavaScript inside a Python string.
+"tests/discovery/spa_site.py" = ["E501"]
 # Lazy exports: the TYPE_CHECKING block is a re-export list, not unused imports.
 "healix/healing/__init__.py" = ["F401"]
 

@@ -4,10 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
-Durable webhook delivery. It is opt-in: without `webhook_outbox` / `--webhook-outbox`, delivery is
-best-effort exactly as before.
+Two opt-in additions: click-through discovery, and durable webhook delivery. Without them, a run
+behaves exactly as before.
 
 ### Added
+- **Click-through discovery** (`crawl.discovery.click_discovery`, off by default). Clicks the buttons and
+  script links that have no `<a href>` to find pages that only script can reach, such as
+  single-page-app routes. It never submits a form and never clicks anything that looks like it deletes,
+  pays, signs out or saves (`click_deny` adds words), and while it clicks the page cannot send data: a
+  best-effort guard, on both backends, stops `fetch` and `XMLHttpRequest` other than GET, beacons and
+  form submission. It is bounded by `max_clicks_per_page` (15) and `max_clicks` (100), stays in
+  `domain_scope`, and does not count clicks against `max_pages`. A page it finds says so in the
+  manifest (`discovered_via`, `discovered_from`), and the manifest gains a `click_discovery` summary
+  (`clicks`, `pages_found`, `skipped_unsafe`, `blocked_writes`). Both are left out when the option is off.
+- `Driver.guarded()` and `Driver.blocked_writes()`: the write guard, available to any caller.
 - **`webhook_outbox=`** on `Crawler`, `Extractor`, `Healer` and `ScriptGenerator`, and
   **`--webhook-outbox PATH`** on `crawl`, `extract` and `generate`. Every event is written to a SQLite
   file before it is sent and removed only once the receiver accepts it, so a receiver that goes down
@@ -24,6 +34,7 @@ best-effort exactly as before.
 - `healix.events`: `DurableWebhookSender`, `Outbox`, `OutboxError`, `open_sender`, `EventSender`.
 
 ### Notes
+- Click-through discovery errs towards skipping, so it misses some real navigation, and it is slow: each click loads the page again. Keep the caps tight.
 - Durable delivery is at least once, not exactly once, and expects one sender per outbox file.
 - After a run, a note on stderr says how many events are still waiting in the outbox.
 

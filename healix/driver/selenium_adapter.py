@@ -43,6 +43,7 @@ from healix.driver.frames import (
     collect_elements,
     walk_frames,
 )
+from healix.driver.guard import BLOCKED_JS, GUARD_JS
 from healix.driver.settle import ACTIVITY_EXPRESSION, POLL_SECONDS, wait_until_quiet
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
@@ -179,6 +180,7 @@ class SeleniumDriverAdapter(Driver):
         self._window_size = window_size
         self._owns_driver = False
         self._skipped: list[SkippedFrame] = []
+        self._guarding = False
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -239,6 +241,8 @@ class SeleniumDriverAdapter(Driver):
         self.webdriver.get(url)
         self._raise_if_error_page(url)
         self.settle()
+        if self._guarding:
+            self._apply_guard()
 
     def _raise_if_error_page(self, url: str) -> None:
         """Playwright raises when a page cannot be loaded; some browsers show an error page and
@@ -325,6 +329,37 @@ class SeleniumDriverAdapter(Driver):
 
     def screenshot(self) -> bytes:
         return self.webdriver.get_screenshot_as_png()
+
+    @contextmanager
+    def guarded(self) -> Iterator[None]:
+        self._guarding = True
+        try:
+            if self._webdriver is not None:
+                self._apply_guard()
+            yield
+        finally:
+            self._guarding = False
+
+    def blocked_writes(self) -> int:
+        total = 0
+        for frame in self.get_frames():
+            if not frame.same_origin:
+                continue
+            try:
+                total += int(self._in_frame(frame, BLOCKED_JS))
+            except WebDriverException:  # the frame navigated away while it was being read
+                logger.debug("could not read the write guard", frame=frame.path)
+        return total
+
+    def _apply_guard(self) -> None:
+        """Install the write guard in every same-origin frame of the current document."""
+        for frame in self.get_frames():
+            if not frame.same_origin:
+                continue
+            try:
+                self._in_frame(frame, GUARD_JS)
+            except WebDriverException:  # the frame navigated away while it was being read
+                logger.debug("could not install the write guard", frame=frame.path)
 
     # -- frames ------------------------------------------------------------- #
 

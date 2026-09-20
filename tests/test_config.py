@@ -152,3 +152,30 @@ def test_coerce_accepts_config_dict_path_and_none(tmp_path):
     assert RunConfig.coerce(path) == cfg
     assert RunConfig.coerce(str(path)) == cfg
     assert RunConfig.coerce(None, require_start=False).extraction == ExtractionConfig()
+
+
+def test_click_discovery_settings_are_read_from_the_run_config():
+    config = RunConfig.from_dict(
+        {
+            "base_url": "https://e.com/",
+            "crawl": {
+                "discovery": {
+                    "click_discovery": True,
+                    "max_clicks_per_page": 5,
+                    "max_clicks": 30,
+                    "click_deny": ["escalate"],
+                }
+            },
+        }
+    )
+    discovery = config.discovery
+    assert discovery.click_discovery is True
+    assert (discovery.max_clicks_per_page, discovery.max_clicks) == (5, 30)
+    assert discovery.click_deny == ["escalate"]
+
+
+def test_a_bad_click_setting_is_a_config_error_not_a_crash():
+    with pytest.raises(ConfigError, match="max_clicks"):
+        RunConfig.from_dict(
+            {"base_url": "https://e.com/", "crawl": {"discovery": {"max_clicks": 0}}}
+        )

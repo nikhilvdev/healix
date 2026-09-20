@@ -175,6 +175,7 @@ rest by tests of the behaviour they describe and by review:
 | `config.py` | `RunConfig`: parse and validate the run JSON; reject secrets. |
 | `driver/base.py` | `Driver` ABC, `Element`, `Frame`, `SkippedFrame`, `Target`, `ElementNotFoundError`. |
 | `driver/frames.py` | In-page JavaScript (collector, queries) and `collect_elements`, `walk_frames`. |
+| `driver/guard.py` | The best-effort write guard injected while clicking (`GUARD_JS`, `BLOCKED_JS`). |
 | `driver/settle.py` | `wait_until_quiet`: the shared "page stopped changing" wait, with no browser import. |
 | `driver/playwright_adapter.py` | `PlaywrightDriverAdapter`. |
 | `driver/selenium_adapter.py` | `SeleniumDriverAdapter`. |
@@ -182,6 +183,7 @@ rest by tests of the behaviour they describe and by review:
 | `driver/diagnose.py` | `BackendReport` (what doctor learns about a backend). |
 | `platform_adapters/` | `PlatformAdapter`, `sap_ui5`, `salesforce_lwc`, `ADAPTERS`, `detected_platform`. |
 | `discovery/crawler.py` | `DiscoveryCrawler`, `DiscoveryConfig`, `Scope`: the link walk. |
+| `discovery/clicks.py` | `select_candidates`: which elements click-through discovery may click, and which it never will. |
 | `discovery/manifest.py` | `Manifest`, `ManifestPage`, `normalize_url`, `template_key`, `structural_hash`. |
 | `classification/rules.py` | `classify`, `classify_page`, `is_oauth_url`; one rule per page type. |
 | `extraction/element_extractor.py` | `ElementExtractor`, `ExtractionConfig`; writes page JSON; records fingerprints. |
@@ -266,6 +268,10 @@ The run's ledger, saved as `manifest.json`:
              "variant_urls": [], "error": null}]
 }
 ```
+
+Two optional additions, both absent unless click-through discovery is on: a page found by clicking
+has `"discovered_via": "click"` and `"discovered_from"`, and the manifest has a `click_discovery`
+object (`clicks`, `pages_found`, `skipped_unsafe`, `blocked_writes`).
 
 `discovery_status` is one of `in_progress`, `complete`, `max_pages_reached`, `interrupted`. Page
 `status` is `pending`, `extracted` or `failed`. The manifest indexes pages by URL and by structural
@@ -447,6 +453,33 @@ same-origin iframes and open shadow roots are found with no extra code.
   ahead of distinct pages.
 - **Ending.** `complete`, `max_pages_reached` (something was left in the frontier) or `interrupted`
   (the manifest is still saved in a `finally`). Load failures become `failed` entries.
+- **Click-through discovery** (opt-in, `crawl.discovery.click_discovery`). Script-only navigation has no
+  `<a href>`, so after a page is recorded the crawler clicks its buttons and script links, and the new
+  URLs it lands on join the frontier like links.
+
+```mermaid
+flowchart TD
+    A["page recorded, anchors queued"] --> B["select_candidates<br/>(pure: elements in, candidates out)"]
+    B --> C{"candidate?"}
+    C -->|"in a form, submits, formaction, download,<br/>or a deny word in label, id, class, handler"| X["skipped, counted as skipped_unsafe"]
+    C -->|"safe, distinct, within the caps"| D["navigate to the page again"]
+    D --> E["driver.guarded(): click, settle"]
+    E --> F{"URL changed,<br/>in scope, a page?"}
+    F -->|no| G["nothing found"]
+    F -->|yes| H["queue it; remember which page led there"]
+    H --> I["visited later: recorded with<br/>discovered_via = click"]
+```
+
+Three layers keep it from doing harm, and each is tested on its own. **Selection**
+(`discovery/clicks.py`, no browser) decides what is never clicked and errs towards skipping.
+**The guard** (`Driver.guarded()`, `driver/guard.py`) makes the page unable to send data while it is
+clicked: `fetch` and `XMLHttpRequest` other than GET/HEAD/OPTIONS, beacons and form submission do
+nothing and are counted, in every same-origin frame, on both backends, reapplied after each
+navigation. It cannot stop a side-effecting GET, a WebSocket, a cross-origin frame or a saved
+reference to `fetch`. **Caps** (`max_clicks_per_page`, `max_clicks`) bound the cost. Each click
+starts from a fresh navigation, so clicks do not interfere; clicks are not visits and do not count
+against `max_pages`. A control repeated down a list is clicked once; a navigation bar repeated on
+every page is clicked on every page, which is the main cost.
 
 ### Stage 2: extraction (`extraction/element_extractor.py`)
 
@@ -820,7 +853,9 @@ One JSON document, safe to commit (`config.py`):
   "start_url": "https://example.com/login",
   "crawl": {
     "discovery":  {"domain_scope": "same_domain", "max_pages": 50,
-                   "dedupe_by": "url_normalized_and_structural_hash", "template_sample_size": 3},
+                   "dedupe_by": "url_normalized_and_structural_hash", "template_sample_size": 3,
+                   "click_discovery": false, "max_clicks_per_page": 15, "max_clicks": 100,
+                   "click_deny": []},
     "extraction": {"sequence": "one_by_one", "output_format": "json", "output_path": "./output/",
                    "iframe_traversal": true, "platform_detection": "auto",
                    "settle_quiet_ms": null}
@@ -985,7 +1020,10 @@ Documented rather than hidden; each is also in the README.
 - **Closed shadow roots and cross-origin iframes** are not reachable and are skipped. Frames are
   reported in the page's `skipped_frames`; a closed shadow root is not (a script cannot tell one is
   there).
-- **Script-only navigation** (buttons and router pushes with no `<a href>`) is invisible to discovery.
+- **Script-only navigation** (buttons and router pushes with no `<a href>`) is invisible to discovery
+  unless click-through discovery is on. It is off by default, skips anything that looks unsafe (so it
+  misses some real navigation), guards writes only on a best-effort basis, and is slow: each click
+  is a fresh navigation.
 - **Extraction reads each page from a fresh navigation.** Client-side state and filled-in forms are not
   reproduced.
 - **Structural dedup is coarse by design**; `dedupe_by="url_normalized"` turns it off.

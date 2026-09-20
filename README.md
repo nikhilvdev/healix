@@ -314,7 +314,8 @@ One JSON file describes a crawl. It is safe to commit: it never holds secrets.
       "domain_scope": "same_domain",
       "max_pages": 50,
       "dedupe_by": "url_normalized_and_structural_hash",
-      "template_sample_size": 3
+      "template_sample_size": 3,
+      "click_discovery": false
     },
     "extraction": {
       "sequence": "one_by_one",
@@ -1058,8 +1059,67 @@ shadow roots are found too.
 | `dedupe_by` | `"url_normalized_and_structural_hash"` | Or `"url_normalized"` to keep every distinct URL |
 | `template_sample_size` | `3` | Once this many URLs of one path template (`/product/1`, `/product/2`, …) have been visited, further ones are **deferred** until all other pages are visited — never dropped. `0` disables |
 
+| `click_discovery` | `false` | Also click buttons and script links that have no `<a href>`, to find pages only script can reach. See [Click-through discovery](#click-through-discovery) |
+| `max_clicks_per_page` | `15` | Most clicks on any one page |
+| `max_clicks` | `100` | Most clicks in the whole run |
+| `click_deny` | `[]` | Extra words that mark a control as never to be clicked (added to the built-in list) |
+
 `template_sample_size` exists so a family of look-alike pages can't use up `max_pages` ahead
 of distinct pages. With 200 product links and `max_pages=50`, `/about` still gets visited.
+
+### Click-through discovery
+
+Some navigation is only script: a `<button>` that calls `history.pushState`, a
+`<div role="button">` that sets `location`, an `<a href="#">` with a click handler. There is no
+link to follow, so ordinary discovery cannot see the page behind it. Turn on
+`crawl.discovery.click_discovery` and Healix clicks such controls and notes where the page ends up:
+
+```json
+{ "crawl": { "discovery": { "click_discovery": true, "max_clicks": 50 } } }
+```
+
+It is **off by default**, and a run without it behaves exactly as before. Clicking things on a live
+site can do harm, so what it does *not* do matters more than what it does:
+
+- **It never submits a form.** A `<button>` inside a form (unless `type="button"`), an
+  `<input type="submit|image|reset">`, and anything with a `formaction` are skipped.
+- **It never clicks anything that looks like it commits something.** The label, `aria-label`,
+  `title`, `id`, classes, `data-testid`, `href` and `onclick` are checked, and the text inside the
+  control too, so `<button><span>Delete</span></button>` and an icon-only trash button with
+  `class="btn-danger"` are both caught. The words are in `healix.discovery.clicks.DENY_WORDS`:
+  delete, remove, pay, purchase, sign out, log out, submit, send, save, confirm, cancel, reset,
+  publish, transfer and so on. Add your own with `click_deny`. **It errs towards skipping:** words
+  match at the start of a word, so a "Payments" menu is skipped with "Pay now". The cost of a missed
+  page is lower than the cost of a click that deletes something.
+- **The page cannot send data while it is clicked.** A best-effort guard is injected into each page
+  (Playwright and Selenium alike): `fetch` and `XMLHttpRequest` with any method but GET, HEAD or
+  OPTIONS, beacons and form submissions do nothing and are counted. It is a safety net, not a
+  sandbox. It cannot stop a GET request that has a side effect, a WebSocket message, a request from
+  a cross-origin frame, or a page that saved its own reference to `fetch` before the guard ran.
+- **It stays in scope.** A click that leads outside `domain_scope` is ignored.
+- **It is bounded.** `max_clicks_per_page` and `max_clicks` cap it. A control repeated down a list
+  (`Edit`, `Edit`, `Edit`, …) is clicked once. Clicks are not page visits, so they do not count
+  against `max_pages`.
+
+Each click starts from a fresh load of the page, so one click cannot change what the next finds. That
+makes a run with many clicks slow, and a navigation bar that repeats on every page is clicked on
+every page: keep the caps tight and add the noisy controls to `click_deny`.
+
+A page found this way says so in the manifest (`"discovered_via": "click"`, `"discovered_from":
+"<the page whose button led here>"`), and the manifest records what happened overall:
+
+```json
+"click_discovery": { "clicks": 12, "pages_found": 4, "skipped_unsafe": 5, "blocked_writes": 1 }
+```
+
+`skipped_unsafe` is how many controls were left alone for being unsafe, and `blocked_writes` how many
+requests the guard stopped. A non-zero `blocked_writes` means a button you did not expect to write
+did try to. Both keys are left out of the manifest when the option is off.
+
+A found route is later extracted from a **fresh navigation** like every other page, so it has to load
+when opened directly. A single-page app whose server only answers `/` will record such a route as
+`failed`, which is honest: the page cannot be reached without the click. Routes in the URL hash
+(`#/team`) work, since `normalize_url` keeps them.
 
 ### How pages are deduplicated
 
@@ -1325,7 +1385,9 @@ These are fixed unless explicitly reopened:
   not reproduced. The browser keeps its login session across the run, but with `--no-login`, no
   credentials, or a failed login, a page that redirects to a login page is recorded as `failed`.
 - **Script-only navigation** — buttons and router pushes with no `<a href>` — is invisible
-  to discovery.
+  to discovery unless you turn on [click-through discovery](#click-through-discovery). That is
+  off by default, skips anything that looks unsafe (so it misses some real navigation), cannot
+  fully sandbox a page, and is slow.
 - **Client-rendered sites** that render after network idle, or never go idle, may be read before
   they finish rendering, and pages with an identical (e.g. empty) structure would then collapse
   into one manifest entry. Set `crawl.extraction.settle_quiet_ms` to wait for the page to stop

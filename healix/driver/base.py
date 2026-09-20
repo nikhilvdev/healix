@@ -8,6 +8,8 @@ or ``selenium``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -188,6 +190,21 @@ class Driver(ABC):
         skipped; frames were not asked for). Drivers that cannot say leave the default.
         """
         return []
+
+    @contextmanager
+    def guarded(self) -> Iterator[None]:
+        """While active, make the pages this driver loads unable to send data, best-effort.
+
+        ``fetch`` and ``XMLHttpRequest`` with any method but GET, HEAD or OPTIONS, beacons and form
+        submissions do nothing and are counted (``blocked_writes``). It is a safety net for
+        clicking around a live site, not a sandbox: see ``healix.driver.guard`` for what it cannot
+        stop. Drivers that cannot install it leave the default, which guards nothing.
+        """
+        yield
+
+    def blocked_writes(self) -> int:
+        """How many writes the guard has stopped in the current page (``0`` when not guarded)."""
+        return 0
 
     @abstractmethod
     def screenshot(self) -> bytes: ...

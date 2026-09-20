@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
@@ -17,6 +18,7 @@ from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, SkippedFrame, Target
 from healix.driver.diagnose import BackendReport
 from healix.driver.frames import build_collect_js, build_describe_js, collect_elements, walk_frames
+from healix.driver.guard import BLOCKED_JS, GUARD_JS
 from healix.driver.settle import ACTIVITY_EXPRESSION, wait_until_quiet
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
@@ -101,6 +103,7 @@ class PlaywrightDriverAdapter(Driver):
         self._browser: Any = None
         self._owns_browser = False
         self._skipped: list[SkippedFrame] = []
+        self._guarding = False
 
     # -- lifecycle ---------------------------------------------------------- #
 
@@ -152,6 +155,8 @@ class PlaywrightDriverAdapter(Driver):
                 logger.debug("navigation was interrupted; retrying", url=url, attempt=attempt + 1)
                 self._wait_for_load(1000)
         self.settle()
+        if self._guarding:
+            self._apply_guard()
 
     def _wait_for_load(self, timeout_ms: int) -> None:
         try:
@@ -239,7 +244,38 @@ class PlaywrightDriverAdapter(Driver):
     def screenshot(self) -> bytes:
         return self.page.screenshot()
 
+    @contextmanager
+    def guarded(self) -> Iterator[None]:
+        self._guarding = True
+        try:
+            if self._page is not None:
+                self._apply_guard()
+            yield
+        finally:
+            self._guarding = False
+
+    def blocked_writes(self) -> int:
+        total = 0
+        for frame in self.get_frames():
+            if not frame.same_origin:
+                continue
+            try:
+                total += int(frame.handle.evaluate(BLOCKED_JS))
+            except PlaywrightError:  # the frame navigated away while it was being read
+                logger.debug("could not read the write guard", frame=frame.path)
+        return total
+
     # -- internals ---------------------------------------------------------- #
+
+    def _apply_guard(self) -> None:
+        """Install the write guard in every same-origin frame of the current document."""
+        for frame in self.get_frames():
+            if not frame.same_origin:
+                continue
+            try:
+                frame.handle.evaluate(GUARD_JS)
+            except PlaywrightError:  # the frame navigated away while it was being read
+                logger.debug("could not install the write guard", frame=frame.path)
 
     def _search_frames(self, fingerprint: Fingerprint) -> list[Frame]:
         frames = [f for f in self.get_frames() if f.same_origin]

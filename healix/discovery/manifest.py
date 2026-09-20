@@ -161,6 +161,10 @@ class ManifestPage:
     # Other URLs visited that rendered this same structure (recognised as one page type).
     variant_urls: list[str] = field(default_factory=list)
     error: str | None = None
+    # How the page was found when it was not by following a link: ``"click"`` (click-through
+    # discovery) and the page whose button led here. Left out of the JSON when unset.
+    discovered_via: str | None = None
+    discovered_from: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> ManifestPage:
@@ -174,10 +178,12 @@ class ManifestPage:
             output_file=raw.get("output_file"),
             variant_urls=list(raw.get("variant_urls") or []),
             error=raw.get("error"),
+            discovered_via=raw.get("discovered_via"),
+            discovered_from=raw.get("discovered_from"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        raw: dict[str, Any] = {
             "url": self.url,
             "page_type": self.page_type,
             "structural_hash": self.structural_hash,
@@ -186,6 +192,10 @@ class ManifestPage:
             "variant_urls": self.variant_urls,
             "error": self.error,
         }
+        if self.discovered_via:
+            raw["discovered_via"] = self.discovered_via
+            raw["discovered_from"] = self.discovered_from
+        return raw
 
 
 @dataclass
@@ -196,6 +206,9 @@ class Manifest:
     platform_detected: str | None = None
     # A login page was reached but no credentials were set: pages behind it were not reachable.
     blocked_on_auth: bool = False
+    # What click-through discovery did (``clicks``, ``pages_found``, ``skipped_unsafe``,
+    # ``blocked_writes``); ``None`` when it was not on, and then left out of the JSON.
+    click_discovery: dict[str, int] | None = None
     pages: list[ManifestPage] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -301,6 +314,7 @@ class Manifest:
             "pages_extracted": self.pages_extracted,
             "platform_detected": self.platform_detected,
             "blocked_on_auth": self.blocked_on_auth,
+            **({"click_discovery": self.click_discovery} if self.click_discovery else {}),
             "pages": [p.to_dict() for p in self.pages],
         }
 
@@ -312,6 +326,7 @@ class Manifest:
             discovery_status=raw.get("discovery_status", COMPLETE),
             platform_detected=raw.get("platform_detected"),
             blocked_on_auth=bool(raw.get("blocked_on_auth", False)),
+            click_discovery=raw.get("click_discovery") or None,
             pages=[ManifestPage.from_dict(p) for p in raw.get("pages") or []],
         )
 

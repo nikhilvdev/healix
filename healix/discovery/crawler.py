@@ -8,7 +8,9 @@ discovery only records what exists.
 Links come from ``Driver.get_elements()``, so anchors inside same-origin
 iframes and open shadow roots are found with no extra code. Navigation that
 only happens through script (buttons, router pushes with no ``<a href>``) is not
-discoverable this way.
+discoverable this way, unless click-through discovery is switched on
+(``DiscoveryConfig.click_discovery``, off by default): see ``healix.discovery.clicks`` for
+what it will and will not click.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import os
 import uuid
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,6 +27,7 @@ from healix.auth import BLOCKED, FAILED, SKIPPED, Authenticator, LoginResult
 from healix.classification import classify, is_oauth_url
 from healix.classification.rules import LOGIN
 from healix.discovery import manifest as m
+from healix.discovery.clicks import Candidate, select_candidates
 from healix.discovery.manifest import (
     Manifest,
     ManifestPage,
@@ -98,12 +101,24 @@ class DiscoveryConfig:
     are deferred until everything else has been visited. Nothing is dropped — it
     only keeps a large family of look-alike pages from using up ``max_pages``
     ahead of distinct pages. ``0`` disables deferral.
+
+    ``click_discovery`` (off by default) also clicks the buttons and script links that have no
+    ``<a href>``, to find pages that only script can reach (single-page-app routes). It never
+    submits a form, never clicks anything that looks like it deletes, pays, signs out or saves
+    (``click_deny`` adds words to that list), and while it clicks, the page cannot send data. It
+    is bounded: ``max_clicks_per_page`` and ``max_clicks`` for the whole run. Clicks are not page
+    visits, so they do not count against ``max_pages``. Each click loads the page again first, so
+    a run with many clicks is slow: keep the caps tight.
     """
 
     domain_scope: str = "same_domain"
     max_pages: int = 50
     dedupe_by: str = "url_normalized_and_structural_hash"
     template_sample_size: int = 3
+    click_discovery: bool = False
+    max_clicks_per_page: int = 15
+    max_clicks: int = 100
+    click_deny: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.domain_scope not in DOMAIN_SCOPES:
@@ -116,6 +131,16 @@ class DiscoveryConfig:
             raise ValueError("max_pages must be at least 1")
         if self.template_sample_size < 0:
             raise ValueError("template_sample_size cannot be negative")
+        if not isinstance(self.click_discovery, bool):
+            raise ValueError(f"click_discovery must be true or false, got {self.click_discovery!r}")
+        for name in ("max_clicks_per_page", "max_clicks"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a whole number, at least 1, got {value!r}")
+        if not isinstance(self.click_deny, list) or not all(
+            isinstance(word, str) and word.strip() for word in self.click_deny
+        ):
+            raise ValueError("click_deny must be a list of non-empty words")
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> DiscoveryConfig:
@@ -150,6 +175,10 @@ class DiscoveryCrawler:
         self.classifier = classifier
         self.on_page_discovered = on_page_discovered
         self.authenticator = authenticator
+        # Click-through discovery, for the discovery in progress.
+        self._clicks: dict[str, int] = {}
+        self._click_found: dict[str, str] = {}  # URL -> the page whose button led there
+        self._seen: set[str] = set()
 
     def discover(
         self,
@@ -170,6 +199,12 @@ class DiscoveryCrawler:
         starts = [normalize_url(u) for u in start_urls]
         scope = Scope(config.domain_scope, starts)
         manifest = Manifest(run_id=run_id or uuid.uuid4().hex[:12], start_urls=list(start_urls))
+        self._click_found = {}
+        if config.click_discovery:
+            self._clicks = {"clicks": 0, "pages_found": 0, "skipped_unsafe": 0, "blocked_writes": 0}
+            manifest.click_discovery = (
+                self._clicks
+            )  # updated in place, so an interrupted run keeps it
 
         logger.info(
             "discovery started",
@@ -181,6 +216,7 @@ class DiscoveryCrawler:
         queue: deque[str] = deque(dict.fromkeys(starts))
         deferred: deque[str] = deque()
         seen: set[str] = set(queue)  # ever queued
+        self._seen = seen
         visited: set[str] = set()  # actually loaded (after redirects)
         template_visits: Counter[str] = Counter()
         visits = 0
@@ -222,6 +258,7 @@ class DiscoveryCrawler:
                 status=manifest.discovery_status,
                 visits=visits,
                 pages_discovered=manifest.pages_discovered,
+                **({"clicks": self._clicks["clicks"]} if config.click_discovery else {}),
             )
         return manifest
 
@@ -250,6 +287,8 @@ class DiscoveryCrawler:
         links = self._record(final, elements, page_type, manifest, scope)
         if self.authenticator is not None:
             links += self._authenticate(url, final, elements, page_type, manifest, scope)
+        if self.config.click_discovery and page_type != LOGIN:
+            links += self._click_through(final, elements, scope, known=set(links))
         return links
 
     def _load(self, url: str, manifest: Manifest) -> str | None:
@@ -300,6 +339,10 @@ class DiscoveryCrawler:
             logger.debug(
                 "page discovered", url=final, page_type=page_type, structural_hash=page_hash
             )
+            if final in self._click_found:
+                page.discovered_via = "click"
+                page.discovered_from = self._click_found[final]
+                self._clicks["pages_found"] += 1
             if self.on_page_discovered:
                 self.on_page_discovered(page)
         else:
@@ -308,6 +351,56 @@ class DiscoveryCrawler:
         # Links are followed from every visited page, including structural duplicates —
         # a repeated template can still link somewhere new.
         return [link for link in _links(elements) if scope.allows(link)]
+
+    # -- clicking --------------------------------------------------------------------- #
+
+    def _click_through(
+        self, url: str, elements: list[Element], scope: Scope, known: set[str]
+    ) -> list[str]:
+        """Click what ``url`` offers that is safe to click; the new in-scope pages it leads to.
+
+        Each click starts from a fresh load of ``url``, so what one click does to the page cannot
+        change what the next one finds. ``known`` are URLs this page already links to.
+        """
+        config = self.config
+        room = config.max_clicks - self._clicks["clicks"]
+        if room <= 0:
+            return []
+        selection = select_candidates(
+            elements, limit=min(config.max_clicks_per_page, room), extra_deny=config.click_deny
+        )
+        self._clicks["skipped_unsafe"] += selection.skipped_unsafe
+        if selection.over_limit:
+            logger.debug("more to click than the limit allows", url=url, left=selection.over_limit)
+        found: list[str] = []
+        with self.driver.guarded():
+            for candidate in selection.candidates:
+                self._clicks["clicks"] += 1
+                target = self._click(url, candidate, scope)
+                if target and target not in known and target not in self._seen:
+                    known.add(target)
+                    self._click_found.setdefault(target, url)
+                    found.append(target)
+        return found
+
+    def _click(self, url: str, candidate: Candidate, scope: Scope) -> str | None:
+        """Load ``url``, click ``candidate``; where that led if it is a new page in scope."""
+        try:
+            self.driver.navigate(url)
+            self.driver.click(candidate.element)
+            self.driver.settle()
+            self._clicks["blocked_writes"] += self.driver.blocked_writes()
+            after = _safe_normalize(self.driver.current_url)
+        except Exception as exc:
+            logger.debug("could not click", url=url, error=str(exc), error_type=type(exc).__name__)
+            return None
+        if after is None or after == url:
+            return None
+        if not scope.allows(after) or not _is_page_url(after):
+            logger.debug("a click led out of scope; ignored", url=url)
+            return None
+        logger.debug("a click found a page", url=url, found=after)
+        return after
 
     # -- logging in ------------------------------------------------------------------- #
 
