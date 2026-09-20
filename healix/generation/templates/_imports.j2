@@ -1,0 +1,24 @@
+import contextlib
+{% if uses_env %}
+import os
+{% endif %}
+from collections.abc import Iterator
+{% if style == "test" %}
+from urllib.parse import urlsplit
+{% endif %}
+
+{% if style == "test" %}
+import pytest
+{% endif %}
+{% if uses_env %}
+from dotenv import load_dotenv
+{% endif %}
+{% if style == "test" or uses_env %}
+
+{% endif %}
+from healix import Healer
+{% if style == "pom" %}
+from healix.driver import Element, {{ adapter }}
+{% else %}
+from healix.driver import {{ adapter }}
+{% endif %}

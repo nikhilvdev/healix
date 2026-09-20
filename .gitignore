@@ -12,4 +12,5 @@ dist/
 
 # Healix run output
 output/
+healix.db
 CLAUDE.md

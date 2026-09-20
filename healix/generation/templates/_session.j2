@@ -1,0 +1,25 @@
+{% if uses_env %}
+load_dotenv()
+
+{% endif %}
+{% if database_from_env %}
+FINGERPRINT_DB = os.environ[{{ database_env|py }}]  # a database URL is never written into a script
+{% else %}
+FINGERPRINT_DB = {{ database|py }}
+{% endif %}
+HEADLESS = True
+
+
+@contextlib.contextmanager
+def session(headless: bool = HEADLESS) -> Iterator[Healer]:
+    """A ``Healer`` driving a fresh browser; the browser and the store are closed on exit.
+
+{% if backend == "playwright" %}
+    The Playwright page is ``healer.driver.page``.
+{% else %}
+    The Selenium driver is ``healer.driver.webdriver``.
+{% endif %}
+    """
+    with {{ adapter }}(headless=headless) as driver:
+        with Healer(FINGERPRINT_DB, driver=driver) as healer:
+            yield healer

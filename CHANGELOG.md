@@ -2,12 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased
+## 1.0.0 — 2026-09-20
 
-Pre-release: nothing is published to PyPI yet. The first eight milestones of the build
-plan are implemented; script generation and `healix doctor` are not.
+The first release: discovery, classification, extraction, login, self-healing, the Selenium and
+Playwright backends, the SAP UI5 and Salesforce LWC platform adapters, script generation and
+`healix doctor`, behind one SDK, CLI and event schema. See the README's *Known limitations* for what
+it does not do; in particular the Salesforce adapter has not been run against a real org, and only
+Chrome is tested for Selenium.
 
 ### Added
+
+- **Script generation.** `ScriptGenerator` (`healix.ScriptGenerator`) and `healix generate` turn
+  the extracted pages of a crawl into a script for Playwright or Selenium, in one of three styles:
+  `pom` (a page-object class per page), `test` (a `pytest` module that asserts each page's address
+  and that every element is found, visible and enabled) and `action` (fill the inputs, click
+  submit). Every step goes through `Healer`, so the script heals when the page changes; generating
+  also records the fingerprints it heals against (`--fingerprint-db`, `--no-record`). Login values
+  come from `WEBLIB_LOGIN_USERNAME` / `WEBLIB_LOGIN_PASSWORD`, a Postgres URL is read from
+  `HEALIX_FINGERPRINT_DB` rather than written into the file, and page text is emitted as quoted
+  data. `generate` warns when the database a script points at has no fingerprints for its pages.
+  The `script_generated` event is now emitted (one per script). New runtime dependency:
+  `jinja2`. Templates live in `healix/generation/templates/`.
+- **`healix doctor`.** Checks the Python version, the dependencies, each backend's package and
+  browser, the optional Postgres driver and whether login credentials are set (never their values);
+  `--launch` opens each usable browser and reads a page; `--json` for machines. Exits `0` when at
+  least one backend is usable, `1` when none is. The probes live in the adapter modules
+  (`diagnose()`), so only they import a browser library.
 
 - **Selenium backend.** `SeleniumDriverAdapter` (`healix.driver.selenium_adapter`), selected with
   `"backend": "selenium"` or `Healer(backend="selenium")`; install with `healix[selenium]` (or

@@ -58,7 +58,10 @@ raised as an issue and discussed *before* code is written.
 
 - **Everything goes through `Driver`.** Extraction, discovery, healing, classification, and
   generation must never import `playwright` or `selenium`. Only adapter modules
-  (`driver/playwright_adapter.py` and `driver/selenium_adapter.py`) may.
+  (`driver/playwright_adapter.py` and `driver/selenium_adapter.py`) may; `tests/test_architecture.py`
+  enforces it. [ARCHITECTURE.md](ARCHITECTURE.md) describes the layers and how to extend them. That includes the
+  environment checks in `healix doctor`, which call each adapter's `diagnose()`. Generated scripts
+  reach a browser only through `healix.driver` too.
 - **Pure Python.** No second implementation language and no compiled core.
 - **No LLM calls** in the crawl/discover/classify/extract path. Classification is
   rule-based so runs are deterministic and cost nothing.

@@ -9,13 +9,14 @@ finds, extracts every element with maximum raw detail into JSON, and generates
 self-healing Selenium/Playwright automation scripts. It is built to plug into
 external orchestration platforms through an SDK, a CLI, and webhooks.
 
-**Status: pre-release, under active development.** The driver abstraction (Playwright and
+**Status: 1.0.** The driver abstraction (Playwright and
 Selenium), iframe/shadow-DOM traversal, stable-ID normalization, page discovery with its manifest,
 rule-based page classification, extraction to per-page JSON, and the SDK, CLI, and event/webhook
 surface are implemented and tested, and so are automatic login (username/password, SSO, session
 expiry), self-healing (weighted, threshold-gated, persisted, audited) and the optional SAP UI5 and
-Salesforce platform adapters. Script generation and `healix doctor` are **not built yet** — see the
-[Roadmap](#roadmap) and `CHANGELOG.md`. Nothing is published to PyPI yet.
+Salesforce platform adapters. Script generation (`ScriptGenerator`, `healix generate`) and
+`healix doctor` are built too. See [Known limitations](#known-limitations) for what it does not do,
+and `CHANGELOG.md` for the release notes.
 
 ## Features
 
@@ -78,11 +79,22 @@ Available now:
   persisted and every heal is audited as routine churn or a possible regression. It refuses rather
   than guess — see [Self-healing](#self-healing)
 
-Planned (see [Roadmap](#roadmap)): script generation and `healix doctor`.
+- **Script generation** — `ScriptGenerator` and `healix generate` turn a crawl into a page-object
+  module, a `pytest` file, or a plain fill-and-click script, for Playwright or Selenium. Every step
+  goes through `Healer`, so the script keeps working when the page changes — see
+  [Script generation](#script-generation)
+- **`healix doctor`** — checks the Python version, the dependencies, each backend's package and
+  browser, and (with `--launch`) that a browser really opens and reads a page — see [CLI](#cli)
 
 ## Install
 
-Healix is not on PyPI yet. From a checkout:
+```bash
+pip install "healix[all]"        # or healix[playwright], healix[selenium]
+playwright install chromium      # for the Playwright backend
+healix doctor                    # check that this machine is ready
+```
+
+From a checkout, for development:
 
 ```bash
 git clone https://github.com/nikhilvdev/healix.git
@@ -94,7 +106,7 @@ playwright install chromium
 ```
 
 Requires Python 3.10+. This also installs the `healix` command. Runtime dependencies are
-`logquill` (logging) and `python-dotenv` (the CLI loads `.env`). The browser libraries are optional
+`logquill` (logging), `python-dotenv` (the CLI loads `.env`) and `jinja2` (script generation). The browser libraries are optional
 extras: `healix[playwright]` (the default backend; then `playwright install chromium`) and
 `healix[selenium]` (needs Chrome installed; Selenium finds the matching driver itself).
 `healix[all]` installs both and `healix[postgres]`, the `psycopg` driver only needed to keep
@@ -342,6 +354,7 @@ from healix import Crawler, Extractor
 |---|---|
 | `Crawler(config, *, run_id=None, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.discover()` finds pages and writes the manifest. `.discover_and_extract()` then extracts each one |
 | `Extractor(config=None, *, on_event=None, webhook_url=None, webhook_secret=None, driver=None, headless=True, credentials=None, auto_login=True, fingerprint_store=None, fingerprint_mode="keep")` | `.extract(manifest)` extracts a `Manifest` or a path to one, resumably |
+| `ScriptGenerator(source, *, base_dir=None, fingerprint_db=None, record_fingerprints=True, max_elements_per_page=200, on_event=None, webhook_url=None, ...)` | `.to_playwright(style="pom")` / `.to_selenium(style="pom")` / `.generate(backend, style)` build a script and return a `GeneratedScript` — see [Script generation](#script-generation) |
 | `Healer(store=None, *, driver=None, threshold=0.5, ambiguity_margin=0.05, run_id=None, on_event=None, webhook_url=None, ...)` | Records fingerprints and finds elements again after the page changes — see [Self-healing](#self-healing) |
 
 `config` is a path to a run-config JSON, a dict, or a `RunConfig`. Both calls return a `Run`:
@@ -382,6 +395,10 @@ healix crawl   --config run_config.json [--output DIR] [--run-id ID] [--discover
 healix extract --manifest output/manifest.json [--config run_config.json]
                [--webhook-url URL] [--headed] [--no-login] [--fingerprint-db PATH]
                [--json] [--log-level LEVEL]
+healix generate --input output/manifest.json [--backend playwright|selenium]
+               [--style pom|test|action] [--output DIR] [--fingerprint-db PATH] [--no-record]
+               [--webhook-url URL] [--json] [--log-level LEVEL]
+healix doctor [--launch] [--json]
 healix --version          # also: python -m healix
 ```
 
@@ -395,12 +412,38 @@ healix --version          # also: python -m healix
   stderr (JSON lines, `WARN` and above by default; `--log-level` changes it).
 - `--no-login` turns automatic login off.
 - `--fingerprint-db PATH` records an element fingerprint for every actionable element to a SQLite file as pages are extracted — the baseline for [self-healing](#self-healing).
+- `generate` writes one script from the extracted pages of a manifest (default `--backend
+  playwright --style pom`, into `scripts/` beside the manifest) and records the fingerprints it heals
+  against — see [Script generation](#script-generation).
+- `doctor` checks that this machine can run Healix and exits `0` if it can, `1` if it cannot:
+
+  ```text
+  healix 1.0.0 doctor
+
+    ok    python         3.12.14
+    ok    logquill       1.0.0
+    ok    python-dotenv  1.2.3
+    ok    jinja2         3.1.6
+    ok    playwright     1.63.0, browser at …/Google Chrome for Testing
+    ok    selenium       4.49.0, browser at /Applications/Google Chrome.app/…
+    ok    postgres       psycopg 3.3.6 (optional)
+    info  credentials    login credentials are not set; a run that reaches a login page will stop there
+                         -> set WEBLIB_LOGIN_USERNAME and WEBLIB_LOGIN_PASSWORD in the environment or a .env file
+
+  Ready. Usable backends: playwright, selenium.
+  ```
+
+  A backend that is not installed is reported (`--`) and is not an error: one usable backend is
+  enough. Without `--launch` nothing is started, so a browser that is installed but broken looks fine;
+  `--launch` opens each usable browser, loads a page and reads its elements, which proves it. For
+  Selenium that is also what downloads the matching chromedriver the first time (Selenium Manager),
+  so it needs network access. Credentials are reported as set or not, never shown.
 - The CLI loads a `.env` from the current directory (that is where the login credentials can live).
 
 | Exit status | Meaning |
 |---|---|
 | `0` | Success |
-| `1` | Runtime error (browser failure, backend unavailable, …) |
+| `1` | Runtime error (browser failure, backend unavailable, …); for `doctor`, no usable backend |
 | `2` | Usage or configuration error, including a run conflict |
 | `3` | The run finished, but some pages failed (`--run-id` the same id to retry them) |
 | `4` | Blocked on authentication: a login page was reached but no credentials are set |
@@ -432,8 +475,9 @@ it is final. A `login_failed` `reason` is one of `mfa_required`, `timeout`, `sel
 
 **Emitted today:** `page_discovered` (once per new manifest entry), `page_extracted` (once per page
 written), `login_failed` (once per failed login — see [Authentication](#authentication)), and
-`run_complete` (last). `element_healed` is emitted by `Healer` (see [Self-healing](#self-healing)).
-**Defined but not emitted yet:** `script_generated`, which arrives with script generation.
+`run_complete` (last). `element_healed` is emitted by `Healer` (see [Self-healing](#self-healing)),
+and `script_generated` by `ScriptGenerator` and `healix generate` (once per script; `file_path` is
+`null` when the script was returned but not written to disk).
 
 A `login_failed` `url` never carries a query string (SSO redirect URLs hold `state` and `code`),
 and `screenshot_ref` is a path relative to the output directory, or `null`.
@@ -708,6 +752,93 @@ with an explanation — not a low-confidence guess.
   crawl would assign. Heal against the stored role, and `refresh` after an intended redesign.
 - The threshold and weights are heuristics calibrated on realistic test pages, not learned from your
   site. Expect to tune `threshold` — and read the regression flags.
+
+## Script generation
+
+`ScriptGenerator` turns the extracted pages of a crawl into a script you can run, for Playwright or
+Selenium:
+
+```python
+from healix import Crawler, ScriptGenerator
+
+run = Crawler("run_config.json").discover_and_extract()
+script = ScriptGenerator(run).to_playwright(style="pom", output="./scripts")
+print(script.file_path, script.page_count, "pages,", script.element_count, "elements")
+```
+
+```bash
+healix generate --input ./output/manifest.json --backend playwright --style pom
+```
+
+`ScriptGenerator(run.pages)` works too; the page files are then read from `./output` (or
+`base_dir=`). `to_playwright`/`to_selenium` return a `GeneratedScript` (`.source`, `.file_path`,
+`.page_count`, `.element_count`, `.skipped`, `.truncated`); pass `output=` (a directory, or a `.py`
+path) to write it.
+
+**One generator, three styles, two backends.** `style` picks what is written; `backend` picks which
+browser the script drives.
+
+| Style | File | What it is |
+|---|---|---|
+| `pom` | `pages_<backend>.py` | A class per page with a method per element (`fill_username`, `click_sign_in`, `locate_…`), and a `session()` that opens a browser |
+| `test` | `test_healix_<backend>.py` | A `pytest` module: one test per page that checks the address and that every element is found, visible and (if it was) enabled. It types and clicks nothing, so it is safe against a live site |
+| `action` | `actions_<backend>.py` | A plain script: per page, fill the inputs and click the submit button. No assertions |
+
+For example, an `action` script for a login page and an order form:
+
+```python
+def run_login(healer: Healer) -> None:
+    """The login page."""
+    url = "http://shop.example.test/login"
+    healer.driver.navigate(url)
+    healer.write(os.environ["WEBLIB_LOGIN_USERNAME"], url, "textbox:login-username", navigate=False)
+    healer.write(os.environ["WEBLIB_LOGIN_PASSWORD"], url, "textbox:password", navigate=False)
+    healer.click(url, "button:sign-in", navigate=False)
+```
+
+**Self-healing comes from `Healer`.** Every step names an element by its stable role
+(`textbox:login-username`), not by a locator, so when the page changes the script resolves it the way
+[`Healer`](#self-healing) does — through the next locator that still matches, else a weighted,
+threshold-gated score — and records the fix. That needs the fingerprints: generating records them
+into `--fingerprint-db` (default `healix.db`) unless you pass `--no-record` because the crawl already
+did (`healix crawl --fingerprint-db`) — in which case pass that same `--fingerprint-db`, because a
+script looks in `healix.db` unless told otherwise. `generate` warns (`GeneratedScript.warnings`) when
+a local SQLite database has no fingerprints for the pages it scripted; a Postgres URL is not
+connected to just to check. The generated code calls `healix.driver`, so it does not
+import `playwright` or `selenium` itself, and it needs `healix` installed to run.
+
+**Secrets never go into a script.** The value for a login page's username and password fields is
+read from `WEBLIB_LOGIN_USERNAME` / `WEBLIB_LOGIN_PASSWORD` (a `.env` is loaded). Nothing is copied
+from the page's own values. A `postgresql://` `--fingerprint-db` is not written into the file (it
+carries a password): the script reads `HEALIX_FINGERPRINT_DB` instead. Page text is quoted as data,
+so a hostile page cannot inject code into a script, and the output is deterministic — the same
+manifest gives the same file.
+
+Only pages whose status is `extracted` are used; pages left out are listed in `.skipped` with the
+reason, and a page with more than `max_elements_per_page` (default 200) actionable elements is cut
+off, counted in `.truncated`.
+
+### What generated scripts do not do
+
+- **They do not log in on their own, and pages are visited one at a time from a fresh navigation.**
+  A page behind a login needs a session first. An `action` script visits pages in manifest order, so
+  if the login page comes before the pages behind it, the browser stays signed in; otherwise, sign in
+  first (in `pom` style, call `LoginPage(healer).open().fill_…().click_…()` before the others).
+- **`action` is deliberately simple:** it types sample values into text inputs and clicks one submit
+  button. It does not choose options in a `<select>`, tick checkboxes, upload files or follow links,
+  and it does not string pages into a journey. The sample values (`user@example.com`, `sample text`,
+  …) are placeholders, not meaningful business data. The other elements are still in `pom` (as
+  `click_…` or `locate_…` methods) for you to drive.
+- **`test` checks presence, not behaviour.** It cannot tell you a form works, only that its elements
+  are still there — and, because it heals, that they are still found when their ids change. The
+  healing is what you would otherwise have written by hand; it can also hide a real regression, so
+  read the [healing history](#the-healing-history).
+- **Elements the crawl could not see are not scripted** — cross-origin iframes, closed shadow roots,
+  canvas-rendered UI ([the canvas boundary](#the-canvas-boundary)) — and a script fails cleanly
+  there, as `Healer` does.
+- Tested against the fixture sites on both backends — the scripts run in a real browser, survive a
+  redesign, and the generated tests fail when the form is removed — but **not against a large real
+  application**. Expect to edit what is generated.
 
 ## How it works
 
@@ -1111,6 +1242,9 @@ created before it was called.
 
 ## Design decisions
 
+The full picture of how the package is built (layers, data flow, the healing algorithm, script
+generation, extension points) is in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 These are fixed unless explicitly reopened:
 
 - **Pure Python.** No second implementation language and no compiled core. Cross-language
@@ -1124,8 +1258,8 @@ These are fixed unless explicitly reopened:
   is handed to a login handler that applies `.env` credentials. It aborts on MFA, submits a
   password at most once per attempt, and gives up rather than retry — see
   [Authentication](#authentication).
-- **Platform adapters are additive.** SAP UI5 and Salesforce LWC adapters, when they land,
-  only add signal on top of the generic pipeline, which always runs on its own.
+- **Platform adapters are additive.** The SAP UI5 and Salesforce LWC adapters only add signal on
+  top of the generic pipeline, which always runs on its own.
 - **Healing must reject weak matches.** Attributes are weighted (stable signals over volatile
   ones), and a best-but-weak candidate below the confidence threshold is rejected, not used.
 
@@ -1148,8 +1282,8 @@ These are fixed unless explicitly reopened:
 - **Structural dedup is coarse by design.** Two different pages whose elements produce the
   same signatures are merged. Use `dedupe_by="url_normalized"` to turn it off.
 - **Webhook delivery is best-effort**, not durable — see [Webhooks](#webhooks).
-- **`ScriptGenerator` and `healix generate` do not exist yet**, and neither does the Selenium backend
-  (`backend: "selenium"` is accepted but raises).
+- **Generated scripts need Healix at runtime** — that is what makes them self-healing — and do not
+  log in by themselves. See [Script generation](#script-generation) for what they do and do not do.
 - **Healing is not a substitute for a test.** A healed element is *probably* the same one; it can be
   wrong. That is why heals are confidence-gated and audited — read the [regression
   flags](#the-healing-history) — and why a heavy refactor heals only just above the threshold.
@@ -1170,23 +1304,11 @@ These are fixed unless explicitly reopened:
 | 6 | Auto-detected login with `.env` credentials, SSO, MFA abort, mid-crawl re-login | ✅ Done |
 | 7 | Self-healing: fingerprints, weighted scorer, confidence threshold, persistent store and history | ✅ Done (SQLite and PostgreSQL stores) |
 | 8 | Selenium adapter, SAP UI5 and Salesforce LWC platform adapters | ✅ Done |
-| 9 | Packaging, `healix doctor`, PyPI release | Planned |
+| — | Script generation: `ScriptGenerator`, `healix generate`, the `script_generated` event | ✅ Done |
+| 9 | Packaging (extras, `.env.example`, MIT licence, README), `healix doctor`, PyPI release | ✅ Done |
 
-### Still planned
-
-Not implemented yet — shown so the direction is clear. It will emit `script_generated` through
-the same `on_event` and webhooks.
-
-```python
-from healix import ScriptGenerator
-
-script = ScriptGenerator(run.pages).to_playwright(style="pom")
-```
-
-```bash
-healix generate --input ./output/manifest.json --backend playwright --style pom
-healix doctor
-```
+Releases go out from a version tag (`v*`) through the `release` workflow, which publishes to PyPI
+with trusted publishing.
 
 
 ## API reference
@@ -1218,7 +1340,8 @@ pytest
 
 The browser tests run real headless Chromium against small fixture sites served over local
 HTTP (including a second origin for the cross-origin cases); they skip themselves if
-Playwright or its browsers aren't installed.
+Playwright or its browsers aren't installed. Most of them run once per backend, so Selenium tests
+need Chrome. The generation tests build scripts from a real crawl and run them, on both backends.
 
 The PostgreSQL store tests need a real server. Set `HEALIX_TEST_POSTGRES_URL` to point at one (CI
 does, with a service container), or just have Docker running: the tests start a throwaway

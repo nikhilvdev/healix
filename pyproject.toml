@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "healix"
-version = "0.1.0.dev0"
+version = "1.0.0"
 description = "Crawl a website, classify and extract every page element, and generate self-healing Selenium/Playwright automation."
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,7 @@ keywords = [
     "page-object-model",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
@@ -37,7 +37,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
-dependencies = ["logquill>=1.0", "python-dotenv>=1.0"]
+dependencies = ["logquill>=1.0", "python-dotenv>=1.0", "jinja2>=3.1"]
 
 [project.optional-dependencies]
 # Playwright is the primary backend; Selenium is the alternative. `postgres` is only needed to keep
@@ -88,6 +88,7 @@ include = [
     "/healix",
     "/tests",
     "/README.md",
+    "/ARCHITECTURE.md",
     "/CHANGELOG.md",
     "/CODE_OF_CONDUCT.md",
     "/CONTRIBUTING.md",

@@ -14,6 +14,7 @@ from playwright.sync_api import Frame as PlaywrightFrame
 from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 
 from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Target
+from healix.driver.diagnose import BackendReport
 from healix.driver.frames import build_collect_js, build_describe_js, collect_elements, walk_frames
 from healix.healing.fingerprint import Fingerprint, LocatorSpec
 from healix.ids import normalize_id
@@ -23,6 +24,37 @@ from healix.platform_adapters import ADAPTERS, PlatformAdapter
 logger = get_logger(__name__)
 
 _NAVIGATION_ATTEMPTS = 3
+
+
+def diagnose() -> BackendReport:
+    """Whether Playwright and its Chromium are installed (``healix doctor``). Launches nothing."""
+    from importlib.metadata import PackageNotFoundError, version
+    from pathlib import Path
+
+    try:
+        installed = version("playwright")
+    except PackageNotFoundError:
+        installed = None
+    try:
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+    except Exception as exc:  # the driver process itself could not start
+        return BackendReport(
+            "playwright",
+            True,
+            installed,
+            problem=f"Playwright could not start: {exc}",
+            hint="pip install --force-reinstall playwright",
+        )
+    if not executable.exists():
+        return BackendReport(
+            "playwright",
+            True,
+            installed,
+            problem="the Chromium browser is not installed",
+            hint="playwright install chromium",
+        )
+    return BackendReport("playwright", True, installed, browser=str(executable))
 
 
 class PlaywrightDriverAdapter(Driver):

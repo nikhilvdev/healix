@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 from healix.driver.base import Driver
+from healix.driver.diagnose import BackendReport
 from healix.platform_adapters import ADAPTERS
 
 BACKENDS = ("playwright", "selenium")
@@ -42,3 +45,28 @@ def create_driver(
             ) from exc
         return SeleniumDriverAdapter(headless=headless, platform_adapters=adapters)
     raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
+
+
+_PACKAGES = {"playwright": "playwright", "selenium": "selenium"}
+_INSTALL = {
+    "playwright": "pip install 'healix[playwright]' && playwright install chromium",
+    "selenium": "pip install 'healix[selenium]'",
+}
+
+
+def diagnose_backend(backend: str) -> BackendReport:
+    """Whether ``backend`` is installed and has a browser to drive. Launches nothing."""
+    if backend not in _PACKAGES:
+        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
+    if importlib.util.find_spec(_PACKAGES[backend]) is None:
+        return BackendReport(
+            backend,
+            False,
+            problem="the Python package is not installed",
+            hint=_INSTALL[backend],
+        )
+    if backend == "playwright":
+        from healix.driver.playwright_adapter import diagnose
+    else:
+        from healix.driver.selenium_adapter import diagnose
+    return diagnose()

@@ -31,6 +31,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 
 from healix.driver.base import Driver, Element, ElementNotFoundError, Frame, Target
+from healix.driver.diagnose import BackendReport
 from healix.driver.frames import (
     CHILD_FRAMES_JS,
     ID_AT_JS,
@@ -51,6 +52,53 @@ logger = get_logger(__name__)
 
 BROWSERS = ("chrome", "firefox", "edge")
 
+_CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
+_CHROME_PATHS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "{PROGRAMFILES}/Google/Chrome/Application/chrome.exe",
+    "{PROGRAMFILES(X86)}/Google/Chrome/Application/chrome.exe",
+    "{LOCALAPPDATA}/Google/Chrome/Application/chrome.exe",
+)
+
+
+def _find_chrome() -> str | None:
+    import os
+    import shutil
+    from pathlib import Path
+
+    for name in _CHROME_NAMES:
+        if found := shutil.which(name):
+            return found
+    for template in _CHROME_PATHS:
+        path = template
+        for var in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
+            path = path.replace("{" + var + "}", os.environ.get(var, "\0"))
+        if "\0" not in path and Path(path).exists():
+            return path
+    return None
+
+
+def diagnose() -> BackendReport:
+    """Whether Selenium and a Chrome/Chromium to drive are installed (``healix doctor``).
+
+    Launches nothing. The matching chromedriver is fetched by Selenium Manager the first time a
+    browser is launched, which needs network access; ``healix doctor --launch`` checks that.
+    """
+    from importlib.metadata import version
+
+    chrome = _find_chrome()
+    if chrome is None:
+        return BackendReport(
+            "selenium",
+            True,
+            version("selenium"),
+            problem="Chrome or Chromium was not found",
+            hint="install Google Chrome or Chromium",
+        )
+    return BackendReport("selenium", True, version("selenium"), browser=chrome)
+
+
 # How often to look at the page while waiting for it to settle.
 _POLL_SECONDS = 0.05
 _ACTIVITY_JS = (
@@ -59,11 +107,6 @@ _ACTIVITY_JS = (
 )
 # Chromedriver stamps this onto every <iframe> it switches into. It is not part of the page.
 _DRIVER_ATTRIBUTES = ("cd_frame_id_",)
-# The documents browsers show instead of a page they could not load.
-_ERROR_PAGES = ("chrome-error://", "edge-error://", "about:neterror", "about:certerror")
-_ERROR_PAGE_JS = (
-    "return [document.URL, (document.querySelector('.error-code') || {}).textContent || null];"
-)
 # The documents browsers show instead of a page they could not load.
 _ERROR_PAGES = ("chrome-error://", "edge-error://", "about:neterror", "about:certerror")
 _ERROR_PAGE_JS = (

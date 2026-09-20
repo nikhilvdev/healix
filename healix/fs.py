@@ -26,3 +26,17 @@ def write_json_atomic(path: str | os.PathLike[str], data: Any, *, indent: int = 
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def write_text_atomic(path: str | os.PathLike[str], text: str) -> None:
+    """Write ``text`` to ``path`` atomically, like ``write_json_atomic``."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
